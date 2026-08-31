@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Aseprite Compiler",
+  "version": "0.1.0",
+  "identifier": "io.github.aseprite-compiler",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Aseprite Compiler",
+        "width": 720,
+        "height": 780,
+        "minWidth": 600,
+        "minHeight": 560,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "appimage",
+      "nsis"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Compile and install Aseprite from source",
+    "longDescription": "Downloads the official Aseprite source code, compiles it locally, installs your personal build, adds it to the app launcher and keeps it up to date.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true,
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFRDk5Nzg3MjMwQjY4NQpSV1NGdGpCeWVKbnRENFRjTHg5aGZOQjc3RWxEd01GamFHQkdDZ0ZLV3JCNTlSc2lnRCtuNWRRaAo=",
+      "endpoints": [
+        "https://github.com/NotYetFound/Aseprite-Compiler/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
