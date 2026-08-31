@@ -4,7 +4,7 @@ Compiles [Aseprite](https://www.aseprite.org/) from the official source and inst
 
 > Not affiliated with Igara Studio. No Aseprite binaries are distributed — everything is compiled locally from the official source, which the [Aseprite EULA](https://github.com/aseprite/aseprite/blob/main/EULA.txt) allows for personal use. If you enjoy Aseprite, consider buying it.
 >
-> Aseprite Compiler is make 100% with AI assistance, use with care and open a [Issue](https://github.com/NotYetFound/Aseprite-Compiler/issues/new) if you have any trubble.
+> Aseprite Compiler is made 100% with AI assistance — use with care, and open an [issue](https://github.com/NotYetFound/Aseprite-Compiler/issues/new) if you have any trouble.
 
 ## Install
 
