@@ -448,6 +448,9 @@ pub fn probe_aseprite_version(bin: &Path) -> Option<String> {
         .or_else(|| version.strip_suffix("-x86"))
         .or_else(|| version.strip_suffix("-arm64"))
         .unwrap_or(version);
+    // Source-compiled Aseprite reports e.g. "1.3.18.3-dev" — the "-dev"
+    // marks an unofficial build, it is not part of the release version.
+    let version = version.strip_suffix("-dev").unwrap_or(version);
     if version.is_empty() {
         None
     } else {
