@@ -29,7 +29,8 @@ The app manages its own portable CMake and Ninja — nothing is installed system
 - Cleans up source and build files after installing (on by default, ~500 MB+ freed)
 - Per-stage progress, resumable downloads, retry from the failed stage
 - Atomic installs — a failed update keeps your previous build working
-- Release watcher with notifications, optional auto-build and tray icon
+- Update notifications when a new Aseprite is out — when you launch Aseprite (via a launcher shim), optionally when a running Aseprite is detected, or on a schedule; building is always your click
+- Launcher entries self-repair on app start, so a moved AppImage never leaves a broken shortcut
 - Uninstall that removes the build and launcher entry, never your Aseprite files
 
 ## Build from source

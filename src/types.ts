@@ -1,5 +1,5 @@
 export type Channel = "stable" | "beta";
-export type WatcherMode = "off" | "notify" | "auto";
+export type WatcherMode = "off" | "notify";
 
 export interface Settings {
   channel: Channel;
@@ -10,6 +10,8 @@ export interface Settings {
   watcherMode: WatcherMode;
   watcherIntervalHours: number;
   parallelJobs: number; // 0 = auto
+  checkOnLaunch: boolean;
+  processWatch: boolean;
 }
 
 export interface ToolStatus {

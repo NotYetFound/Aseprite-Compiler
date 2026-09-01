@@ -5,12 +5,19 @@ mod installer;
 mod net;
 pub mod paths;
 pub mod pipeline;
+mod procwatch;
 pub mod settings;
 mod state;
 mod status;
 pub mod toolchain;
 mod tray;
+mod updates;
 mod watcher;
+
+/// Entry point for `--run-aseprite`: launch Aseprite, check for updates, exit.
+pub fn run_shim(forward_args: Vec<String>) {
+    updates::run_shim(forward_args);
+}
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -76,7 +83,12 @@ pub fn run() {
                 }
             }
 
-            watcher::spawn(app.handle().clone(), engine);
+            watcher::spawn(app.handle().clone(), engine.clone());
+            procwatch::spawn(app.handle().clone(), engine);
+
+            // Self-repair Aseprite's launcher entry: if this app moved (e.g.
+            // a relocated AppImage the shim Exec pointed at), rewrite it.
+            std::thread::spawn(installer::repair_launcher_entry);
 
             // Silent self-update check on startup; the About tab has the
             // manual controls. Failures (e.g. offline) are ignored.

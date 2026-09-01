@@ -55,6 +55,19 @@ pub fn default_install_root() -> PathBuf {
     data_dir().join("install")
 }
 
+/// The stable path of this application. For an AppImage that is the
+/// .AppImage file itself ($APPIMAGE) — not the transient squashfs mount that
+/// current_exe() points into.
+pub fn app_executable() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("APPIMAGE") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    std::env::current_exe().ok()
+}
+
 pub fn ensure_dirs() -> std::io::Result<()> {
     for d in [
         data_dir(),

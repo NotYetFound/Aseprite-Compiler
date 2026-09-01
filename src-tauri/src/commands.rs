@@ -40,6 +40,10 @@ pub fn set_settings(
     } else {
         let _ = autostart.disable();
     }
+
+    // The launch-check setting decides what Aseprite's launcher entry points
+    // at (shim vs. binary) — keep it in sync.
+    std::thread::spawn(installer::repair_launcher_entry);
     Ok(())
 }
 

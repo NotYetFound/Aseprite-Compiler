@@ -641,9 +641,8 @@ impl Engine {
     }
 
     fn stage_register(&self, ctx: &mut Ctx) -> Result<StageResult> {
-        let release = ctx.release.as_ref().ok_or_else(|| anyhow!("no release"))?;
         let src_root = ctx.src_root.clone().ok_or_else(|| anyhow!("no source tree"))?;
-        installer::register_launcher(&ctx.settings.install_root(), &src_root, &release.version)?;
+        installer::register_launcher(&ctx.settings.install_root(), &src_root)?;
         Ok(StageResult::Done("launcher entry created".into()))
     }
 

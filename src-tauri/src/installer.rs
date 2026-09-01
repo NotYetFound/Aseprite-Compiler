@@ -59,96 +59,142 @@ pub fn install_build(build_bin_dir: &Path, install_root: &Path) -> Result<u64> {
     Ok(installed_bytes)
 }
 
+/// The app path Aseprite's launcher entry should go through when the
+/// launch-check shim is enabled: None when disabled or unknown.
+pub fn shim_path() -> Option<PathBuf> {
+    if !crate::settings::Settings::load().check_on_launch {
+        return None;
+    }
+    crate::paths::app_executable()
+}
+
 /// Register the compiled Aseprite in the OS application launcher.
 /// `src_root` is the extracted Aseprite source tree (for the icons).
-pub fn register_launcher(install_root: &Path, src_root: &Path, version: &str) -> Result<()> {
+pub fn register_launcher(install_root: &Path, src_root: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
-    return register_linux(install_root, src_root, version);
-    #[cfg(target_os = "windows")]
-    return register_windows(install_root, version);
-    #[allow(unreachable_code)]
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn register_linux(install_root: &Path, src_root: &Path, version: &str) -> Result<()> {
-    let data_home = dirs::data_dir().context("no data dir")?;
-
-    // Icons from the Aseprite source tree into the hicolor theme.
-    let icon_src = src_root.join("data").join("icons");
-    let mut any_icon = false;
-    for size in [16u32, 32, 48, 64, 128, 256] {
-        let candidate = icon_src.join(format!("ase{size}.png"));
-        if candidate.is_file() {
-            let dir = data_home
-                .join("icons/hicolor")
-                .join(format!("{size}x{size}"))
-                .join("apps");
-            fs::create_dir_all(&dir)?;
-            fs::copy(&candidate, dir.join(format!("{ICON_NAME}.png")))?;
-            any_icon = true;
+    {
+        let data_home = dirs::data_dir().context("no data dir")?;
+        // Icons from the Aseprite source tree into the hicolor theme.
+        let icon_src = src_root.join("data").join("icons");
+        for size in [16u32, 32, 48, 64, 128, 256] {
+            let candidate = icon_src.join(format!("ase{size}.png"));
+            if candidate.is_file() {
+                let dir = data_home
+                    .join("icons/hicolor")
+                    .join(format!("{size}x{size}"))
+                    .join("apps");
+                fs::create_dir_all(&dir)?;
+                fs::copy(&candidate, dir.join(format!("{ICON_NAME}.png")))?;
+            }
         }
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["-q", "-t"])
+            .arg(data_home.join("icons/hicolor"))
+            .status();
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = src_root;
 
-    let bin = aseprite_bin(install_root);
-    let apps_dir = data_home.join("applications");
-    fs::create_dir_all(&apps_dir)?;
-    let desktop = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Aseprite\n\
-         Comment=Animated sprite editor & pixel art tool (local build {version})\n\
-         Exec=\"{bin}\" %U\n\
-         Icon={icon}\n\
-         Terminal=false\n\
-         Categories=Graphics;2DGraphics;RasterGraphics;\n\
-         MimeType=image/x-aseprite;\n\
-         StartupWMClass=Aseprite\n",
-        bin = bin.display(),
-        icon = if any_icon { ICON_NAME } else { "image-x-generic" },
-    );
-    fs::write(apps_dir.join(DESKTOP_FILE), desktop)?;
-
-    // Best-effort cache refreshes; launchers pick the entry up without them too.
-    let _ = std::process::Command::new("update-desktop-database")
-        .arg(&apps_dir)
-        .status();
-    let _ = std::process::Command::new("gtk-update-icon-cache")
-        .args(["-q", "-t"])
-        .arg(data_home.join("icons/hicolor"))
-        .status();
-    Ok(())
+    write_launcher_entry(install_root, shim_path().as_deref())
 }
 
-#[cfg(target_os = "windows")]
-fn register_windows(install_root: &Path, _version: &str) -> Result<()> {
+/// (Re)write Aseprite's launcher entry so it matches current reality. Called
+/// after an install, when the launch-check setting changes, and at every app
+/// start — which self-repairs the entry if this app's executable moved
+/// (e.g. a relocated AppImage that the entry's shim Exec pointed at).
+pub fn write_launcher_entry(install_root: &Path, shim: Option<&Path>) -> Result<()> {
     let bin = aseprite_bin(install_root);
-    let appdata = std::env::var("APPDATA").context("no APPDATA")?;
-    let lnk = Path::new(&appdata)
-        .join("Microsoft\\Windows\\Start Menu\\Programs\\Aseprite (local build).lnk");
-    // Single-quoted PowerShell literals escape ' by doubling it — a path
-    // containing an apostrophe (e.g. C:\Users\O'Brien) must not break out.
-    let ps = |s: String| s.replace('\'', "''");
-    let script = format!(
-        "$ws = New-Object -ComObject WScript.Shell; \
-         $s = $ws.CreateShortcut('{lnk}'); \
-         $s.TargetPath = '{bin}'; \
-         $s.WorkingDirectory = '{dir}'; \
-         $s.IconLocation = '{bin},0'; \
-         $s.Description = 'Aseprite (compiled locally)'; \
-         $s.Save()",
-        lnk = ps(lnk.display().to_string()),
-        bin = ps(bin.display().to_string()),
-        dir = ps(bin.parent().unwrap().display().to_string()),
-    );
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .status()
-        .context("running powershell to create Start Menu shortcut")?;
-    if !status.success() {
-        bail!("could not create the Start Menu shortcut");
+
+    #[cfg(target_os = "linux")]
+    {
+        let data_home = dirs::data_dir().context("no data dir")?;
+        let apps_dir = data_home.join("applications");
+        fs::create_dir_all(&apps_dir)?;
+        let icon_ok = data_home
+            .join("icons/hicolor/64x64/apps")
+            .join(format!("{ICON_NAME}.png"))
+            .is_file();
+        let exec = match shim {
+            Some(app) => format!("\"{}\" --run-aseprite %U", app.display()),
+            None => format!("\"{}\" %U", bin.display()),
+        };
+        let desktop = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Aseprite\n\
+             Comment=Animated sprite editor & pixel art tool (local build)\n\
+             TryExec={bin}\n\
+             Exec={exec}\n\
+             Icon={icon}\n\
+             Terminal=false\n\
+             Categories=Graphics;2DGraphics;RasterGraphics;\n\
+             MimeType=image/x-aseprite;\n\
+             StartupWMClass=Aseprite\n",
+            bin = bin.display(),
+            icon = if icon_ok { ICON_NAME } else { "image-x-generic" },
+        );
+        let path = apps_dir.join(DESKTOP_FILE);
+        // Rewrite (and poke the launcher caches) only when something changed.
+        if fs::read_to_string(&path).ok().as_deref() != Some(desktop.as_str()) {
+            fs::write(&path, desktop)?;
+            let _ = std::process::Command::new("update-desktop-database")
+                .arg(&apps_dir)
+                .status();
+        }
+        Ok(())
     }
-    Ok(())
+
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").context("no APPDATA")?;
+        let lnk = Path::new(&appdata)
+            .join("Microsoft\\Windows\\Start Menu\\Programs\\Aseprite (local build).lnk");
+        let (target, args) = match shim {
+            Some(app) => (app.to_path_buf(), "--run-aseprite"),
+            None => (bin.clone(), ""),
+        };
+        // Single-quoted PowerShell literals escape ' by doubling it — a path
+        // containing an apostrophe (e.g. C:\Users\O'Brien) must not break out.
+        let ps = |s: String| s.replace('\'', "''");
+        let script = format!(
+            "$ws = New-Object -ComObject WScript.Shell; \
+             $s = $ws.CreateShortcut('{lnk}'); \
+             $s.TargetPath = '{target}'; \
+             $s.Arguments = '{args}'; \
+             $s.WorkingDirectory = '{dir}'; \
+             $s.IconLocation = '{bin},0'; \
+             $s.Description = 'Aseprite (compiled locally)'; \
+             $s.Save()",
+            lnk = ps(lnk.display().to_string()),
+            target = ps(target.display().to_string()),
+            bin = ps(bin.display().to_string()),
+            dir = ps(bin.parent().unwrap().display().to_string()),
+        );
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .context("running powershell to create Start Menu shortcut")?;
+        if !status.success() {
+            bail!("could not create the Start Menu shortcut");
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (bin, shim);
+        Ok(())
+    }
+}
+
+/// Startup self-repair: if Aseprite is installed, make sure its launcher
+/// entry exists and points at live paths (fixes a moved AppImage/executable).
+pub fn repair_launcher_entry() {
+    let root = crate::updates::install_root();
+    if !aseprite_bin(&root).is_file() {
+        return;
+    }
+    let _ = write_launcher_entry(&root, shim_path().as_deref());
 }
 
 /// Remove the installed build and its launcher entry. Aseprite's own

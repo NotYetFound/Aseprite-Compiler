@@ -94,22 +94,70 @@
   <div class="rows">
     <label class="row">
       <div class="text">
-        <div class="label">Watch for new releases</div>
-        <div class="dim small">Notify shows a notification; Auto also starts the build.</div>
+        <div class="label">Check when Aseprite starts</div>
+        <div class="dim small">
+          Aseprite's launcher entry starts it through this app, which quietly
+          checks for updates in the background. You're only notified when a
+          new version actually exists.
+        </div>
       </div>
-      <select bind:value={s.watcherMode} onchange={save}>
-        <option value="off">Off</option>
-        <option value="notify">Notify</option>
-        <option value="auto">Auto-build</option>
-      </select>
+      <input
+        type="checkbox"
+        checked={s.checkOnLaunch}
+        onchange={(e) => {
+          s.checkOnLaunch = e.currentTarget.checked;
+          save();
+        }}
+      />
+    </label>
+
+    <label class="row">
+      <div class="text">
+        <div class="label">Detect other launches</div>
+        <div class="dim small">
+          Also notice when the compiled Aseprite is started directly (not via
+          the launcher). Needs this app or its tray icon running.
+        </div>
+      </div>
+      <input
+        type="checkbox"
+        checked={s.processWatch}
+        onchange={(e) => {
+          s.processWatch = e.currentTarget.checked;
+          save();
+        }}
+      />
+    </label>
+
+    <label class="row">
+      <div class="text">
+        <div class="label">Periodic checks</div>
+        <div class="dim small">Also check on a schedule while the app or tray is running.</div>
+      </div>
+      <input
+        type="checkbox"
+        checked={s.watcherMode !== "off"}
+        onchange={(e) => {
+          s.watcherMode = e.currentTarget.checked ? "notify" : "off";
+          save();
+        }}
+      />
     </label>
 
     <label class="row">
       <div class="text">
         <div class="label">Check every</div>
-        <div class="dim small">Hours between release checks.</div>
+        <div class="dim small">Hours between periodic checks.</div>
       </div>
-      <input class="num" type="number" min="1" max="168" bind:value={s.watcherIntervalHours} onchange={save} />
+      <input
+        class="num"
+        type="number"
+        min="1"
+        max="168"
+        bind:value={s.watcherIntervalHours}
+        onchange={save}
+        disabled={s.watcherMode === "off"}
+      />
     </label>
 
     <label class="row">

@@ -5,10 +5,10 @@ use tauri::AppHandle;
 use crate::pipeline::Engine;
 use crate::settings::{Settings, WatcherMode};
 use crate::state::{now_millis, PersistedState};
-use crate::{github, status};
+use crate::{status, updates};
 
-/// Background release watcher: periodically checks GitHub for a new Aseprite
-/// release and notifies (or auto-builds) when one appears.
+/// Timed release watcher: periodically checks GitHub for a new Aseprite
+/// release and notifies when one appears. Building is always user-initiated.
 pub fn spawn(app: AppHandle, engine: Arc<Engine>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(60));
@@ -18,8 +18,7 @@ pub fn spawn(app: AppHandle, engine: Arc<Engine>) {
             continue;
         }
         let interval_ms = u64::from(settings.watcher_interval_hours.max(1)) * 3_600_000;
-        let st = PersistedState::load();
-        let due = st
+        let due = PersistedState::load()
             .last_check
             .map(|t| now_millis().saturating_sub(t) >= interval_ms)
             .unwrap_or(true);
@@ -27,45 +26,7 @@ pub fn spawn(app: AppHandle, engine: Arc<Engine>) {
             continue;
         }
 
-        let Ok(release) = github::fetch_latest(settings.channel) else {
-            continue; // offline; try again next interval
-        };
-
-        let st = PersistedState::update(|st| {
-            st.last_check = Some(now_millis());
-            st.latest = Some(release.clone());
-        });
+        updates::check_and_notify(false, &|t, b| crate::notify(&app, t, b));
         status::emit_status(&app, engine.running());
-
-        // Only act when an *installed* build is outdated. If the user
-        // uninstalled Aseprite, the watcher must not sneak it back in.
-        let Some(installed) = st.installed_version.clone() else {
-            continue;
-        };
-        if installed == release.version {
-            continue;
-        }
-
-        match settings.watcher_mode {
-            WatcherMode::Notify => {
-                crate::notify(
-                    &app,
-                    "Aseprite update available",
-                    &format!(
-                        "Aseprite {} is out. Open Aseprite Compiler to build it.",
-                        release.version
-                    ),
-                );
-            }
-            WatcherMode::Auto => {
-                crate::notify(
-                    &app,
-                    "Aseprite update",
-                    &format!("Building Aseprite {} in the background…", release.version),
-                );
-                let _ = engine.start(settings);
-            }
-            WatcherMode::Off => {}
-        }
     });
 }

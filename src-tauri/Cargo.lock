@@ -85,6 +85,7 @@ dependencies = [
  "dirs 6.0.0",
  "flate2",
  "libc",
+ "notify-rust",
  "serde",
  "serde_json",
  "tar",
@@ -96,6 +97,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tauri-winrt-notification",
  "ureq",
  "zip",
 ]

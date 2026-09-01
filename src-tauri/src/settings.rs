@@ -14,8 +14,9 @@ pub enum Channel {
 #[serde(rename_all = "lowercase")]
 pub enum WatcherMode {
     Off,
+    // `other` also absorbs the removed "auto" mode from old settings files.
+    #[serde(other)]
     Notify,
-    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +30,12 @@ pub struct Settings {
     pub watcher_mode: WatcherMode,
     pub watcher_interval_hours: u32,
     pub parallel_jobs: u32,
+    /// Launcher shim: Aseprite's launcher entry starts it through this app,
+    /// which quietly checks for updates in the background.
+    pub check_on_launch: bool,
+    /// Watch the process table for a running compiled Aseprite (catches
+    /// launches that bypass the launcher entry). Needs the app or tray open.
+    pub process_watch: bool,
 }
 
 impl Default for Settings {
@@ -43,6 +50,8 @@ impl Default for Settings {
             watcher_mode: WatcherMode::Notify,
             watcher_interval_hours: 12,
             parallel_jobs: 0,
+            check_on_launch: true,
+            process_watch: false,
         }
     }
 }

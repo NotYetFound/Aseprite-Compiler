@@ -11,6 +11,8 @@ pub struct PersistedState {
     pub install_path: Option<String>,
     pub last_check: Option<u64>, // epoch millis
     pub latest: Option<ReleaseInfo>,
+    /// Version the user was last notified about — never nag twice for the same release.
+    pub last_notified_version: Option<String>,
 }
 
 pub fn now_millis() -> u64 {
