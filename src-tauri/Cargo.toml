@@ -1,6 +1,6 @@
 [package]
 name = "aseprite-compiler"
-version = "0.1.1"
+version = "0.1.2"
 description = "Compiles and installs Aseprite from the official source, and keeps it up to date"
 authors = ["Eli"]
 edition = "2021"
