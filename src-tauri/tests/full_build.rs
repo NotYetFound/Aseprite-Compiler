@@ -76,7 +76,8 @@ fn skia_tag_scan() {
 #[ignore]
 fn full_build() {
     let engine = Engine::new(Box::new(StderrSink));
-    let settings = Settings::default(); // cleanup on, stable channel, default install dir
+    let mut settings = Settings::default(); // cleanup on, stable channel, default install dir
+    settings.use_ccache = std::env::var_os("TEST_CCACHE").is_some();
     engine.start(settings).expect("start pipeline");
 
     while engine.running() {

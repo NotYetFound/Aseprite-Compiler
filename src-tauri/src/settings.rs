@@ -36,6 +36,9 @@ pub struct Settings {
     /// Watch the process table for a running compiled Aseprite (catches
     /// launches that bypass the launcher entry). Needs the app or tray open.
     pub process_watch: bool,
+    /// Keep a compiler cache (ccache) between builds so updates recompile
+    /// only what changed. The cache lives in the app's data folder.
+    pub use_ccache: bool,
 }
 
 impl Default for Settings {
@@ -52,6 +55,7 @@ impl Default for Settings {
             parallel_jobs: 0,
             check_on_launch: true,
             process_watch: false,
+            use_ccache: false,
         }
     }
 }

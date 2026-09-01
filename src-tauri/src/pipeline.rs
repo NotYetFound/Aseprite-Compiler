@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -179,9 +179,16 @@ pub struct Engine {
     sink: Box<dyn Sink>,
     state: Mutex<PipelineState>,
     log: Mutex<VecDeque<String>>,
+    /// Full log of the current run, persisted under the app's logs dir so a
+    /// failure can be diagnosed after the fact (see export_diagnostics).
+    log_file: Mutex<Option<std::fs::File>>,
     cancel: AtomicBool,
     running: AtomicBool,
     child_pid: Mutex<Option<u32>>,
+    /// Windows: job object the running build's process tree is assigned to,
+    /// so cancellation reliably kills every descendant compiler process.
+    #[cfg(windows)]
+    job: Mutex<Option<winjob::Job>>,
 }
 
 impl Engine {
@@ -196,9 +203,12 @@ impl Engine {
                 summary: None,
             }),
             log: Mutex::new(VecDeque::new()),
+            log_file: Mutex::new(None),
             cancel: AtomicBool::new(false),
             running: AtomicBool::new(false),
             child_pid: Mutex::new(None),
+            #[cfg(windows)]
+            job: Mutex::new(None),
         })
     }
 
@@ -228,7 +238,54 @@ impl Engine {
                 log.pop_front();
             }
         }
+        self.file_line(&line);
         self.sink.emit_log(&line);
+    }
+
+    /// Write a line only to the persistent run log (not the UI console).
+    fn file_line(&self, line: &str) {
+        if let Some(f) = self.log_file.lock().unwrap().as_mut() {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    /// Open a fresh persistent log for this run and rotate old ones.
+    fn open_run_log(&self) {
+        let dir = paths::logs_dir();
+        std::fs::create_dir_all(&dir).ok();
+
+        // Keep the last 9 logs plus the new one; the stamped names sort.
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut old: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("build-") && n.ends_with(".log"))
+                })
+                .collect();
+            old.sort();
+            while old.len() > 9 {
+                std::fs::remove_file(old.remove(0)).ok();
+            }
+        }
+
+        let stamp = crate::state::utc_stamp(now_millis());
+        let path = dir.join(format!("build-{stamp}.log"));
+        if let Ok(f) = std::fs::File::create(&path) {
+            *self.log_file.lock().unwrap() = Some(f);
+            self.file_line(&format!("Aseprite Compiler build log — {stamp} UTC"));
+        }
+    }
+
+    fn close_run_log(&self, result: &Result<()>) {
+        match result {
+            Ok(()) => self.file_line("RESULT: success"),
+            Err(e) if is_cancelled(e) => self.file_line("RESULT: cancelled"),
+            Err(e) => self.file_line(&format!("RESULT: failed — {e:#}")),
+        }
+        *self.log_file.lock().unwrap() = None;
     }
 
     fn set_stage(
@@ -269,6 +326,14 @@ impl Engine {
 
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+        // Windows: terminating the job object kills the entire descendant
+        // tree atomically; taskkill below stays as a belt-and-braces fallback.
+        #[cfg(windows)]
+        {
+            if let Some(job) = self.job.lock().unwrap().as_ref() {
+                job.kill();
+            }
+        }
         let pid = *self.child_pid.lock().unwrap();
         if let Some(pid) = pid {
             kill_process_tree(pid);
@@ -294,6 +359,7 @@ impl Engine {
 
         let engine = Arc::clone(self);
         std::thread::spawn(move || {
+            engine.open_run_log();
             let started = Instant::now();
             let mut ctx = Ctx {
                 settings,
@@ -359,6 +425,7 @@ impl Engine {
                 }
                 _ => {}
             }
+            engine.close_run_log(&result);
         });
         Ok(())
     }
@@ -380,11 +447,14 @@ impl Engine {
         for (id, f) in stages {
             self.check_cancel()?;
             self.set_stage(id, StageStatus::Running, None, "");
+            self.file_line(&format!("=== stage: {id} ==="));
             match f(self, ctx) {
                 Ok(StageResult::Done(detail)) => {
+                    self.file_line(&format!("=== {id}: done ({detail}) ==="));
                     self.set_stage(id, StageStatus::Done, Some(1.0), detail);
                 }
                 Ok(StageResult::Skipped(detail)) => {
+                    self.file_line(&format!("=== {id}: skipped ({detail}) ==="));
                     self.set_stage(id, StageStatus::Skipped, None, detail);
                 }
                 Err(e) => {
@@ -620,6 +690,33 @@ impl Engine {
                 args.push("-DCMAKE_CXX_FLAGS=-stdlib=libstdc++".into());
                 args.push("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libstdc++".into());
             }
+
+            // Optional compiler cache: an update rebuild recompiles only what
+            // changed. The launcher flags are part of the fingerprint, so
+            // toggling the setting reconfigures cleanly.
+            if ctx.settings.use_ccache {
+                match toolchain::find_in_path("ccache") {
+                    Some(cc) => {
+                        args.push(format!("-DCMAKE_C_COMPILER_LAUNCHER={}", cc.display()));
+                        args.push(format!("-DCMAKE_CXX_COMPILER_LAUNCHER={}", cc.display()));
+                        self.log_line("Compiler cache enabled (ccache).");
+                    }
+                    None => self.log_line(
+                        "Compiler cache is enabled but ccache is not installed — \
+                         building without it."
+                            .to_string(),
+                    ),
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            if ctx.settings.use_ccache {
+                self.log_line(
+                    "Compiler cache is not supported with MSVC yet — building without it."
+                        .to_string(),
+                );
+            }
         }
 
         // Skip only when the previous configuration used identical semantic
@@ -666,6 +763,7 @@ impl Engine {
 
         let mut cmd = build_tool_command(&cmake, &args)?;
         cmd.current_dir(&build);
+        apply_ccache_env(&mut cmd, &ctx.settings);
         self.run_cmd(cmd, "configure", |_line, _eng| {})?;
         std::fs::write(&marker, fingerprint)?;
         Ok(StageResult::Done("configured".into()))
@@ -685,6 +783,7 @@ impl Engine {
 
         let mut cmd = build_tool_command(&ninja, &args)?;
         cmd.current_dir(&build);
+        apply_ccache_env(&mut cmd, &ctx.settings);
 
         let engine_self = self;
         self.run_cmd(cmd, "compile", move |line, _eng| {
@@ -813,9 +912,23 @@ impl Engine {
             format!("failed to start {:?}", cmd.get_program())
         })?;
         *self.child_pid.lock().unwrap() = Some(child.id());
+        // Windows: put the child in a kill-on-close job object right away so
+        // every descendant it spawns (cmd → ninja → hundreds of cl.exe) is in
+        // the job and dies with it on cancel — taskkill's tree walk can race.
+        #[cfg(windows)]
+        {
+            let job = winjob::Job::for_pid(child.id());
+            *self.job.lock().unwrap() = job;
+        }
         // A cancel that landed between the check above and pid registration
         // found nothing to kill — close that window now that the pid is known.
         if self.cancel.load(Ordering::SeqCst) {
+            #[cfg(windows)]
+            {
+                if let Some(job) = self.job.lock().unwrap().as_ref() {
+                    job.kill();
+                }
+            }
             kill_process_tree(child.id());
         }
 
@@ -852,6 +965,12 @@ impl Engine {
 
         let status_ = child.wait()?;
         *self.child_pid.lock().unwrap() = None;
+        #[cfg(windows)]
+        {
+            // Dropping the handle closes the job; kill-on-close reaps any
+            // straggler the command left behind.
+            *self.job.lock().unwrap() = None;
+        }
         self.check_cancel()?;
 
         if !status_.success() {
@@ -945,6 +1064,15 @@ pub fn scan_skia_tag(text: &str) -> Option<String> {
     None
 }
 
+/// Point ccache at a self-contained cache inside the app's data folder —
+/// never the user's ~/.cache — with a bounded size.
+fn apply_ccache_env(cmd: &mut Command, settings: &Settings) {
+    if settings.use_ccache {
+        cmd.env("CCACHE_DIR", paths::ccache_dir());
+        cmd.env("CCACHE_MAXSIZE", "2G");
+    }
+}
+
 /// Wrap a tool invocation so it runs inside the MSVC environment on Windows.
 fn build_tool_command(tool: &Path, args: &[String]) -> Result<Command> {
     #[cfg(windows)]
@@ -970,6 +1098,78 @@ fn build_tool_command(tool: &Path, args: &[String]) -> Result<Command> {
         let mut cmd = Command::new(tool);
         cmd.args(args);
         Ok(cmd)
+    }
+}
+
+/// Windows job objects: assigning the build's root process to a job with
+/// KILL_ON_JOB_CLOSE guarantees the whole descendant tree can be terminated
+/// atomically (TerminateJobObject) and can never outlive this app.
+#[cfg(windows)]
+mod winjob {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    pub struct Job(HANDLE);
+
+    // The raw handle is only ever used behind the Engine's mutex.
+    unsafe impl Send for Job {}
+
+    impl Job {
+        /// Create a kill-on-close job and assign `pid` (and its future
+        /// children) to it. None on failure — callers fall back to taskkill.
+        pub fn for_pid(pid: u32) -> Option<Self> {
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return None;
+                }
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                ) == 0
+                {
+                    CloseHandle(job);
+                    return None;
+                }
+                let proc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+                if proc.is_null() {
+                    CloseHandle(job);
+                    return None;
+                }
+                let ok = AssignProcessToJobObject(job, proc) != 0;
+                CloseHandle(proc);
+                if !ok {
+                    CloseHandle(job);
+                    return None;
+                }
+                Some(Self(job))
+            }
+        }
+
+        pub fn kill(&self) {
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
     }
 }
 

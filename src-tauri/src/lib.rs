@@ -1,5 +1,6 @@
 mod archive;
 mod commands;
+mod diagnostics;
 pub mod github;
 mod installer;
 mod net;
@@ -146,6 +147,8 @@ pub fn run() {
             commands::launch_aseprite,
             commands::uninstall_aseprite,
             commands::open_path,
+            commands::reveal_path,
+            commands::export_diagnostics,
             commands::copy_to_clipboard,
             commands::get_app_version,
             commands::check_app_update,

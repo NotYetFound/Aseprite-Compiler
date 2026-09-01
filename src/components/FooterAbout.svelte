@@ -37,6 +37,22 @@
       updateError = `update install failed: ${e}`;
     }
   }
+
+  let diagState = $state<"idle" | "working" | "done" | "error">("idle");
+  let diagPath = $state("");
+  let diagError = $state<string | null>(null);
+
+  async function exportDiagnostics() {
+    diagState = "working";
+    diagError = null;
+    try {
+      diagPath = await api.exportDiagnostics();
+      diagState = "done";
+    } catch (e) {
+      diagState = "error";
+      diagError = `diagnostics export failed: ${e}`;
+    }
+  }
 </script>
 
 <footer>
@@ -55,12 +71,23 @@
       <button class="link" onclick={checkUpdate}>check for app updates</button>
     {/if}
     <span class="sep">·</span>
+    {#if diagState === "working"}
+      <span>exporting…</span>
+    {:else if diagState === "done"}
+      <button class="link" onclick={() => api.revealPath(diagPath)}>show diagnostics zip</button>
+    {:else}
+      <button class="link" onclick={exportDiagnostics}>export diagnostics</button>
+    {/if}
+    <span class="sep">·</span>
     <button class="link" onclick={() => api.openPath("https://github.com/aseprite/aseprite/blob/main/EULA.txt")}>EULA</button>
     <span class="sep">·</span>
     <button class="link" onclick={() => api.openPath("https://www.aseprite.org/")}>aseprite.org</button>
   </div>
   {#if updateState === "error" && updateError}
     <div class="err">{updateError}</div>
+  {/if}
+  {#if diagState === "error" && diagError}
+    <div class="err">{diagError}</div>
   {/if}
   <div class="notice">
     Not affiliated with Igara Studio. Aseprite is compiled locally from the official

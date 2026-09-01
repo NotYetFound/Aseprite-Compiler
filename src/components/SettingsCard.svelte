@@ -88,6 +88,17 @@
       </div>
       <input type="checkbox" bind:checked={s.cleanupAfterBuild} onchange={save} />
     </label>
+
+    <label class="row">
+      <div class="text">
+        <div class="label">Compiler cache</div>
+        <div class="dim small">
+          Keep a ccache between builds so updates recompile only what changed
+          (uses up to 2 GB in the app's data folder; needs ccache installed).
+        </div>
+      </div>
+      <input type="checkbox" bind:checked={s.useCcache} onchange={save} />
+    </label>
   </div>
 
   <div class="group-label section-label spaced">Updates</div>

@@ -44,6 +44,16 @@ pub fn set_settings(
     // The launch-check setting decides what Aseprite's launcher entry points
     // at (shim vs. binary) — keep it in sync.
     std::thread::spawn(installer::repair_launcher_entry);
+
+    // Turning the compiler cache off reclaims its disk space right away.
+    if !settings.use_ccache {
+        let dir = crate::paths::ccache_dir();
+        if dir.is_dir() {
+            std::thread::spawn(move || {
+                let _ = std::fs::remove_dir_all(dir);
+            });
+        }
+    }
     Ok(())
 }
 
@@ -156,6 +166,28 @@ pub fn open_path(app: AppHandle, path: String) -> CmdResult<()> {
 #[tauri::command]
 pub fn copy_to_clipboard(app: AppHandle, text: String) -> CmdResult<()> {
     app.clipboard().write_text(text).map_err(err_str)
+}
+
+/// Zip settings, state, tool health, and build logs into the Downloads
+/// folder; returns the zip's path.
+#[tauri::command]
+pub async fn export_diagnostics(app: AppHandle) -> CmdResult<String> {
+    let version = app.package_info().version.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::diagnostics::export(&version)
+            .map(|p| p.display().to_string())
+            .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// Open the file manager with `path` selected.
+#[tauri::command]
+pub fn reveal_path(app: AppHandle, path: String) -> CmdResult<()> {
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(err_str)
 }
 
 #[tauri::command]

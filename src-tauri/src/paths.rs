@@ -49,6 +49,12 @@ pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
 }
 
+/// Compiler cache (when enabled in settings). Lives outside work/cache so the
+/// post-build cleanup never deletes it; removed when the setting is turned off.
+pub fn ccache_dir() -> PathBuf {
+    data_dir().join("ccache")
+}
+
 /// Default Aseprite install root; the live build lives in `<root>/current`
 /// so the launcher entry keeps a stable path across updates.
 pub fn default_install_root() -> PathBuf {

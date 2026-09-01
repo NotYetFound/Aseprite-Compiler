@@ -12,6 +12,7 @@ export interface Settings {
   parallelJobs: number; // 0 = auto
   checkOnLaunch: boolean;
   processWatch: boolean;
+  useCcache: boolean;
 }
 
 export interface ToolStatus {
