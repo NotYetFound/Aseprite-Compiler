@@ -2,7 +2,7 @@
 
 Compiles [Aseprite](https://www.aseprite.org/) from the official source and installs it on your computer — one button. It adds Aseprite to your app launcher, keeps it updated, and cleans up after itself.
 
-> Not affiliated with [Igara Studio](https://igara.com/). No Aseprite binaries are distributed — everything is compiled locally from the official source, which the [Aseprite EULA](https://github.com/aseprite/aseprite/blob/main/EULA.txt) allows for personal use. If you enjoy Aseprite, and you're in a position to, please consider [buying](https://www.aseprite.org/) it and supporting the devs.
+> Not affiliated with [Igara Studio](https://igara.com/). No Aseprite binaries are distributed — everything is compiled locally from the official source, which the [Aseprite EULA](https://github.com/aseprite/aseprite/blob/main/EULA.txt) allows for personal use. If you enjoy Aseprite, consider [buying](https://www.aseprite.org/) it.
 >
 > Aseprite Compiler is made 100% with AI assistance — use with care, and open an [issue](https://github.com/NotYetFound/Aseprite-Compiler/issues/new) if you have any trouble.
 
