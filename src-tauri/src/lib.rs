@@ -86,9 +86,14 @@ pub fn run() {
             watcher::spawn(app.handle().clone(), engine.clone());
             procwatch::spawn(app.handle().clone(), engine);
 
-            // Self-repair Aseprite's launcher entry: if this app moved (e.g.
-            // a relocated AppImage the shim Exec pointed at), rewrite it.
-            std::thread::spawn(installer::repair_launcher_entry);
+            // Startup self-repair: first heal any install transaction that a
+            // crash interrupted (restores the previous working build if the
+            // activation rename never completed), then rewrite the launcher
+            // entry if this app moved (e.g. a relocated AppImage).
+            std::thread::spawn(|| {
+                installer::recover_install(&updates::install_root());
+                installer::repair_launcher_entry();
+            });
 
             // Silent self-update check on startup; the About tab has the
             // manual controls. Failures (e.g. offline) are ignored.

@@ -15,15 +15,36 @@ pub struct ReleaseInfo {
     pub name: String,
     pub source_zip_url: String,
     pub source_zip_size: u64,
+    /// Lowercase hex SHA-256 of the source zip, when GitHub publishes one.
+    #[serde(default)]
+    pub source_zip_sha256: Option<String>,
 }
 
-fn find_source_asset(release: &serde_json::Value) -> Option<(String, u64)> {
+/// A resolved Skia package for one platform.
+#[derive(Debug, Clone)]
+pub struct SkiaAsset {
+    pub tag: String,
+    pub asset_name: String,
+    pub url: String,
+    pub sha256: Option<String>,
+}
+
+/// GitHub asset "digest" fields look like "sha256:<hex>".
+fn asset_sha256(asset: &serde_json::Value) -> Option<String> {
+    asset["digest"]
+        .as_str()?
+        .strip_prefix("sha256:")
+        .map(|h| h.to_ascii_lowercase())
+}
+
+fn find_source_asset(release: &serde_json::Value) -> Option<(String, u64, Option<String>)> {
     release["assets"].as_array()?.iter().find_map(|a| {
         let name = a["name"].as_str()?;
         if name.ends_with("-Source.zip") {
             Some((
                 a["browser_download_url"].as_str()?.to_string(),
                 a["size"].as_u64().unwrap_or(0),
+                asset_sha256(a),
             ))
         } else {
             None
@@ -36,7 +57,7 @@ fn to_release_info(release: &serde_json::Value) -> Result<ReleaseInfo> {
         .as_str()
         .ok_or_else(|| anyhow!("release has no tag"))?
         .to_string();
-    let (source_zip_url, source_zip_size) = find_source_asset(release)
+    let (source_zip_url, source_zip_size, source_zip_sha256) = find_source_asset(release)
         .ok_or_else(|| anyhow!("release {tag} has no -Source.zip asset"))?;
     Ok(ReleaseInfo {
         version: tag.trim_start_matches('v').to_string(),
@@ -44,6 +65,7 @@ fn to_release_info(release: &serde_json::Value) -> Result<ReleaseInfo> {
         tag,
         source_zip_url,
         source_zip_size,
+        source_zip_sha256,
     })
 }
 
@@ -73,54 +95,58 @@ pub fn fetch_latest(channel: Channel) -> Result<ReleaseInfo> {
     }
 }
 
-/// Resolve the Skia package download URL for `tag` (e.g. "m124-08a5439a6b").
-/// Returns (tag, asset_name, url).
-pub fn skia_asset(tag: Option<&str>) -> Result<(String, String, String)> {
-    let release = match tag {
-        Some(t) => net::http_get_json(&format!(
-            "https://api.github.com/repos/{SKIA_REPO}/releases/tags/{t}"
-        ))
-        .or_else(|_| {
-            // Pinned tag not found — fall back to the latest Skia release.
-            net::http_get_json(&format!(
-                "https://api.github.com/repos/{SKIA_REPO}/releases/latest"
-            ))
-        })?,
-        None => net::http_get_json(&format!(
-            "https://api.github.com/repos/{SKIA_REPO}/releases/latest"
-        ))?,
-    };
+fn platform_skia_asset_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Skia-Windows-Release-x64.zip"
+    } else {
+        "Skia-Linux-Release-x64.zip"
+    }
+}
 
-    let resolved_tag = release["tag_name"]
+fn skia_from_release(release: &serde_json::Value) -> Result<SkiaAsset> {
+    let tag = release["tag_name"]
         .as_str()
         .ok_or_else(|| anyhow!("skia release has no tag"))?
         .to_string();
-
+    let want = platform_skia_asset_name();
     let assets = release["assets"]
         .as_array()
-        .ok_or_else(|| anyhow!("skia release has no assets"))?;
+        .ok_or_else(|| anyhow!("skia release {tag} has no assets"))?;
+    let asset = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(want))
+        .ok_or_else(|| anyhow!("skia release {tag} has no {want} asset"))?;
+    Ok(SkiaAsset {
+        tag,
+        asset_name: want.to_string(),
+        url: asset["browser_download_url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("asset has no url"))?
+            .to_string(),
+        sha256: asset_sha256(asset),
+    })
+}
 
-    let candidates: &[&str] = if cfg!(target_os = "windows") {
-        &["Skia-Windows-Release-x64.zip"]
-    } else {
-        // The standard Linux package (built with clang against libc++);
-        // the build configures Aseprite with matching flags.
-        &["Skia-Linux-Release-x64.zip"]
-    };
-
-    for want in candidates {
-        if let Some(a) = assets.iter().find(|a| a["name"].as_str() == Some(want)) {
-            return Ok((
-                resolved_tag,
-                want.to_string(),
-                a["browser_download_url"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("asset has no url"))?
-                    .to_string(),
-            ));
-        }
-    }
-    Err(anyhow!(
-        "no matching Skia package found in release {resolved_tag}"
+/// Resolve exactly the pinned Skia release. A pinned dependency is never
+/// silently substituted: any failure here is a hard error, not a fallback.
+pub fn skia_asset_exact(tag: &str) -> Result<SkiaAsset> {
+    let release = net::http_get_json(&format!(
+        "https://api.github.com/repos/{SKIA_REPO}/releases/tags/{tag}"
     ))
+    .with_context(|| {
+        format!(
+            "the Aseprite source pins Skia {tag}, but that release could not be \
+             resolved from {SKIA_REPO} — refusing to substitute a different Skia version"
+        )
+    })?;
+    skia_from_release(&release)
+}
+
+/// Latest Skia release — only for sources that carry no pin at all.
+pub fn skia_asset_latest() -> Result<SkiaAsset> {
+    let release = net::http_get_json(&format!(
+        "https://api.github.com/repos/{SKIA_REPO}/releases/latest"
+    ))
+    .context("fetching latest Skia release")?;
+    skia_from_release(&release)
 }

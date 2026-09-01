@@ -46,9 +46,20 @@ fn resolve_release() {
     assert!(stable.source_zip_url.ends_with("-Source.zip"));
     assert!(!stable.version.is_empty());
 
-    let (tag, asset, url) = aseprite_compiler_lib::github::skia_asset(None).unwrap();
-    eprintln!("skia latest: {tag} {asset} {url}");
-    assert!(url.starts_with("https://"));
+    // The digest field is what source verification relies on — assert it's
+    // present for the current stable release.
+    assert!(
+        stable.source_zip_sha256.is_some(),
+        "expected GitHub to publish a sha256 digest for the source zip"
+    );
+
+    let skia = aseprite_compiler_lib::github::skia_asset_exact("m124-08a5439a6b").unwrap();
+    eprintln!("skia exact: {} {} {}", skia.tag, skia.asset_name, skia.url);
+    assert_eq!(skia.tag, "m124-08a5439a6b");
+    assert!(skia.url.starts_with("https://"));
+
+    // A nonexistent pin must fail — never fall back to a different version.
+    assert!(aseprite_compiler_lib::github::skia_asset_exact("m999-doesnotexist").is_err());
 }
 
 #[test]

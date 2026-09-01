@@ -13,10 +13,35 @@ pub fn aseprite_bin(install_root: &Path) -> PathBuf {
         .join(if cfg!(windows) { "aseprite.exe" } else { "aseprite" })
 }
 
+/// Heal an interrupted install transaction. Called at app startup and before
+/// every install:
+/// - `current` missing but `.previous` present (crash between the two
+///   renames) → restore the previous working build;
+/// - `current` and `.previous` both present (crash after activation) → the
+///   activated build was already validated, so the leftover can go;
+/// - stray `.staging` with no active transaction → remove it.
+pub fn recover_install(install_root: &Path) {
+    let current = install_root.join("current");
+    let previous = install_root.join(".previous");
+    let staging = install_root.join(".staging");
+
+    if !current.exists() && previous.exists() {
+        let _ = fs::rename(&previous, &current);
+    } else if current.exists() && previous.exists() {
+        fs::remove_dir_all(&previous).ok();
+    }
+    fs::remove_dir_all(&staging).ok();
+}
+
 /// Copy the finished build (aseprite binary + data folder) into the install
-/// root atomically: stage first, then swap, restoring the old build on failure.
-/// Returns the installed size in bytes.
-pub fn install_build(build_bin_dir: &Path, install_root: &Path) -> Result<u64> {
+/// root transactionally: stage, validate the staged binary, then swap —
+/// restoring the old build on failure. The previous build is only removed
+/// after the new one is active. Returns (installed bytes, validated version).
+pub fn install_build(
+    build_bin_dir: &Path,
+    install_root: &Path,
+    validate: impl Fn(&Path) -> Result<String>,
+) -> Result<(u64, String)> {
     let bin_name = if cfg!(windows) { "aseprite.exe" } else { "aseprite" };
     if !build_bin_dir.join(bin_name).is_file() {
         bail!(
@@ -42,7 +67,22 @@ pub fn install_build(build_bin_dir: &Path, install_root: &Path) -> Result<u64> {
             fs::remove_file(&p).ok();
         }
     }
+    if !staging.join("data").is_dir() {
+        fs::remove_dir_all(&staging).ok();
+        bail!("staged build is missing its data directory");
+    }
 
+    // Validate the staged binary BEFORE touching the working install.
+    let version = match validate(&staging.join(bin_name)) {
+        Ok(v) => v,
+        Err(e) => {
+            fs::remove_dir_all(&staging).ok();
+            return Err(e).context("validating the staged build");
+        }
+    };
+
+    // recover_install ran before us, so .previous should not exist; the
+    // defensive removal only clears debris, never a needed rollback copy.
     fs::remove_dir_all(&old).ok();
     let had_current = current.exists();
     if had_current {
@@ -56,7 +96,7 @@ pub fn install_build(build_bin_dir: &Path, install_root: &Path) -> Result<u64> {
         return Err(e).context("activating new build");
     }
     fs::remove_dir_all(&old).ok();
-    Ok(installed_bytes)
+    Ok((installed_bytes, version))
 }
 
 /// The app path Aseprite's launcher entry should go through when the

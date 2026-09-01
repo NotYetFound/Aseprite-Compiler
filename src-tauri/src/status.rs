@@ -31,7 +31,13 @@ pub fn build_status(refresh: bool, busy: bool) -> anyhow::Result<StatusInfo> {
     };
 
     // Ask the installed binary itself for its version; fall back to state.
-    let root = settings.install_root();
+    // The recorded install location is authoritative over the (possibly
+    // since-changed) configured setting — same rule as uninstall.
+    let root = st
+        .install_path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| settings.install_root());
     let bin = installer::aseprite_bin(&root);
     let installed_version =
         toolchain::probe_aseprite_version(&bin).or_else(|| st.installed_version.clone());

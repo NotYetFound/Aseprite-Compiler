@@ -9,6 +9,18 @@ use crate::{archive, net, paths};
 const NINJA_VERSION: &str = "1.12.1";
 const CMAKE_VERSION: &str = "3.31.6";
 
+// Pinned SHA-256 checksums for the managed portable tools, taken from the
+// vendors' official release checksum files (Kitware's cmake-*-SHA-256.txt;
+// ninja computed from the official GitHub release assets).
+#[cfg(target_os = "windows")]
+const NINJA_SHA256: &str = "f550fec705b6d6ff58f2db3c374c2277a37691678d6aba463adcbb129108467a";
+#[cfg(not(target_os = "windows"))]
+const NINJA_SHA256: &str = "6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255";
+#[cfg(target_os = "windows")]
+const CMAKE_SHA256: &str = "d163cd3ab4959b0a53fa8988f2ddbd2e6c501658201e6a154386bad9dbe4f836";
+#[cfg(not(target_os = "windows"))]
+const CMAKE_SHA256: &str = "5a1133ff103c71eb5120e2cc3de922733e7d8a26a98ae716397e8676adb367bf";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolStatus {
@@ -79,9 +91,30 @@ fn version_of(bin: &Path, arg: &str) -> String {
         .arg(arg)
         .output()
         .ok()
+        .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.lines().next().unwrap_or("").trim().to_string())
         .unwrap_or_default()
+}
+
+/// A tool's reported version line — used in build fingerprints, so a tool
+/// upgrade at the same path invalidates stale configure/build products.
+pub fn tool_version(bin: &Path) -> String {
+    version_of(bin, "--version")
+}
+
+/// Version stamp of a managed portable tool ("ninja"/"cmake" dir name).
+fn portable_stamp(dir_name: &str) -> Option<String> {
+    std::fs::read_to_string(paths::tools_dir().join(dir_name).join(".version"))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn write_portable_stamp(dir_name: &str, version: &str) {
+    let _ = std::fs::write(
+        paths::tools_dir().join(dir_name).join(".version"),
+        version,
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -158,53 +191,60 @@ pub fn check() -> ToolReport {
     let mut tools = Vec::new();
     let mut missing_system = false;
 
-    // Portable tools
-    match cmake_path() {
-        Some(p) => {
-            let portable = p == portable_cmake();
-            tools.push(ToolStatus {
-                id: "cmake".into(),
-                name: "CMake".into(),
-                ok: true,
-                detail: format!(
-                    "{}{}",
-                    version_of(&p, "--version"),
-                    if portable { " · portable" } else { "" }
-                ),
+    // Portable/managed tools: "found" is not enough — the tool must actually
+    // run and report a version to count as healthy.
+    for (id, name, found, portable_path, prefix) in [
+        (
+            "cmake",
+            "CMake",
+            cmake_path(),
+            portable_cmake(),
+            "",
+        ),
+        (
+            "ninja",
+            "Ninja",
+            ninja_path(),
+            portable_ninja(),
+            "ninja ",
+        ),
+    ] {
+        match found {
+            Some(p) => {
+                let version = version_of(&p, "--version");
+                let portable = p == portable_path;
+                if version.is_empty() {
+                    tools.push(ToolStatus {
+                        id: id.into(),
+                        name: name.into(),
+                        ok: false,
+                        detail: format!(
+                            "found at {} but it can't be run — the app can reinstall a portable copy",
+                            p.display()
+                        ),
+                        provisionable: true,
+                    });
+                } else {
+                    tools.push(ToolStatus {
+                        id: id.into(),
+                        name: name.into(),
+                        ok: true,
+                        detail: format!(
+                            "{prefix}{version}{}",
+                            if portable { " · portable" } else { "" }
+                        ),
+                        provisionable: true,
+                    });
+                }
+            }
+            None => tools.push(ToolStatus {
+                id: id.into(),
+                name: name.into(),
+                ok: false,
+                detail: "Not found — the app can install a portable copy".into(),
                 provisionable: true,
-            });
+            }),
         }
-        None => tools.push(ToolStatus {
-            id: "cmake".into(),
-            name: "CMake".into(),
-            ok: false,
-            detail: "Not found — the app can install a portable copy".into(),
-            provisionable: true,
-        }),
-    }
-
-    match ninja_path() {
-        Some(p) => {
-            let portable = p == portable_ninja();
-            tools.push(ToolStatus {
-                id: "ninja".into(),
-                name: "Ninja".into(),
-                ok: true,
-                detail: format!(
-                    "ninja {}{}",
-                    version_of(&p, "--version"),
-                    if portable { " · portable" } else { "" }
-                ),
-                provisionable: true,
-            });
-        }
-        None => tools.push(ToolStatus {
-            id: "ninja".into(),
-            name: "Ninja".into(),
-            ok: false,
-            detail: "Not found — the app can install a portable copy".into(),
-            provisionable: true,
-        }),
     }
 
     #[cfg(target_os = "linux")]
@@ -249,6 +289,7 @@ pub fn check() -> ToolReport {
             ("xrandr", "Xrandr headers"),
             ("gl", "OpenGL headers"),
             ("fontconfig", "Fontconfig headers"),
+            ("libwebp", "WebP headers"),
         ] {
             let ok = pkg_config_ok(pkg).unwrap_or(false);
             if !ok {
@@ -313,23 +354,23 @@ fn helper_command() -> (Option<String>, Option<String>) {
         let id = linux_distro_id();
         let (cmd, label) = match id.as_str() {
             "arch" | "cachyos" | "endeavouros" | "manjaro" | "garuda" => (
-                "sudo pacman -S --needed clang pkgconf libx11 libxcursor libxi libxrandr mesa fontconfig",
+                "sudo pacman -S --needed clang pkgconf libx11 libxcursor libxi libxrandr mesa fontconfig libwebp",
                 "Arch-based system detected. Run this in a terminal:",
             ),
             "debian" | "ubuntu" | "linuxmint" | "pop" => (
-                "sudo apt install clang pkg-config libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev",
+                "sudo apt install clang pkg-config libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev libwebp-dev",
                 "Debian/Ubuntu-based system detected. Run this in a terminal:",
             ),
             "fedora" | "nobara" => (
-                "sudo dnf install clang pkgconf-pkg-config libX11-devel libXcursor-devel libXi-devel libXrandr-devel mesa-libGL-devel fontconfig-devel",
+                "sudo dnf install clang pkgconf-pkg-config libX11-devel libXcursor-devel libXi-devel libXrandr-devel mesa-libGL-devel fontconfig-devel libwebp-devel",
                 "Fedora-based system detected. Run this in a terminal:",
             ),
             "opensuse-tumbleweed" | "opensuse-leap" => (
-                "sudo zypper install clang pkgconf-pkg-config libX11-devel libXcursor-devel libXi-devel libXrandr-devel Mesa-libGL-devel fontconfig-devel",
+                "sudo zypper install clang pkgconf-pkg-config libX11-devel libXcursor-devel libXi-devel libXrandr-devel Mesa-libGL-devel fontconfig-devel libwebp-devel",
                 "openSUSE detected. Run this in a terminal:",
             ),
             _ => (
-                "clang (or g++), pkg-config, and development headers for: X11, Xcursor, Xi, Xrandr, OpenGL, Fontconfig",
+                "clang (or g++), pkg-config, and development headers for: X11, Xcursor, Xi, Xrandr, OpenGL, Fontconfig, WebP",
                 "Install these with your distribution's package manager:",
             ),
         };
@@ -374,16 +415,27 @@ fn cmake_url() -> (String, String) {
 
 /// Download portable copies of any missing tools into the app's own tools dir.
 /// Everything stays inside the app's data folder; nothing touches the system.
+/// Downloads are verified against pinned SHA-256 checksums, and a portable
+/// tool whose version stamp no longer matches the pinned version is replaced
+/// (only after the replacement downloads and verifies).
 pub fn provision(cancel: &AtomicBool, mut log: impl FnMut(String)) -> Result<()> {
     paths::ensure_dirs()?;
-    let no_cancel = AtomicBool::new(false);
-    let _ = &no_cancel;
 
-    if ninja_path().is_none() {
-        log(format!("Downloading portable Ninja {NINJA_VERSION}…"));
-        let archive_path = paths::cache_dir().join("ninja.zip");
-        net::download_with_resume(&ninja_url(), &archive_path, cancel, |_, _| {})?;
+    let ninja_stale = portable_ninja().is_file()
+        && portable_stamp("ninja").as_deref() != Some(NINJA_VERSION);
+    if ninja_path().is_none() || ninja_stale {
+        log(format!(
+            "{} portable Ninja {NINJA_VERSION}…",
+            if ninja_stale { "Updating" } else { "Downloading" }
+        ));
+        let archive_path = paths::cache_dir().join(format!("ninja-{NINJA_VERSION}.zip"));
+        let expected = net::Expected {
+            size: None,
+            sha256: Some(NINJA_SHA256.into()),
+        };
+        net::download_verified(&ninja_url(), &archive_path, &expected, cancel, |_, _| {})?;
         let dest = paths::tools_dir().join("ninja");
+        std::fs::remove_dir_all(&dest).ok();
         archive::extract_zip(&archive_path, &dest, cancel, |_, _| {})?;
         #[cfg(unix)]
         {
@@ -394,18 +446,29 @@ pub fn provision(cancel: &AtomicBool, mut log: impl FnMut(String)) -> Result<()>
             );
         }
         std::fs::remove_file(&archive_path).ok();
-        if !portable_ninja().is_file() {
+        if portable_ninja().is_file() && !tool_version(&portable_ninja()).is_empty() {
+            write_portable_stamp("ninja", NINJA_VERSION);
+        } else {
             bail!("ninja extraction failed");
         }
         log("Portable Ninja installed.".into());
     }
 
-    if cmake_path().is_none() {
+    let cmake_stale = portable_cmake().is_file()
+        && portable_stamp("cmake").as_deref() != Some(CMAKE_VERSION);
+    if cmake_path().is_none() || cmake_stale {
         let (url, root_name) = cmake_url();
-        log(format!("Downloading portable CMake {CMAKE_VERSION}…"));
+        log(format!(
+            "{} portable CMake {CMAKE_VERSION}…",
+            if cmake_stale { "Updating" } else { "Downloading" }
+        ));
         let file_name = url.rsplit('/').next().unwrap().to_string();
         let archive_path = paths::cache_dir().join(&file_name);
-        net::download_with_resume(&url, &archive_path, cancel, |_, _| {})?;
+        let expected = net::Expected {
+            size: None,
+            sha256: Some(CMAKE_SHA256.into()),
+        };
+        net::download_verified(&url, &archive_path, &expected, cancel, |_, _| {})?;
 
         let extract_root = paths::tools_dir().join("cmake-extract");
         std::fs::remove_dir_all(&extract_root).ok();
@@ -421,7 +484,9 @@ pub fn provision(cancel: &AtomicBool, mut log: impl FnMut(String)) -> Result<()>
             .context("moving extracted cmake into place")?;
         std::fs::remove_dir_all(&extract_root).ok();
         std::fs::remove_file(&archive_path).ok();
-        if !portable_cmake().is_file() {
+        if portable_cmake().is_file() && !tool_version(&portable_cmake()).is_empty() {
+            write_portable_stamp("cmake", CMAKE_VERSION);
+        } else {
             bail!("cmake extraction failed");
         }
         log("Portable CMake installed.".into());

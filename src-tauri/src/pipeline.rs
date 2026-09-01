@@ -24,6 +24,10 @@ pub trait Sink: Send + Sync + 'static {
 
 const LOG_TAIL_MAX: usize = 2000;
 
+/// Bump when backend build rules change in a way that invalidates existing
+/// configure/build products (e.g. a new required CMake flag).
+const BACKEND_RULES_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StageStatus {
@@ -167,6 +171,8 @@ struct Ctx {
     skia_dir: Option<PathBuf>,
     installed_bytes: u64,
     cleaned_bytes: u64,
+    /// Version reported by the staged binary during install validation.
+    probed_version: Option<String>,
 }
 
 pub struct Engine {
@@ -296,6 +302,7 @@ impl Engine {
                 skia_dir: None,
                 installed_bytes: 0,
                 cleaned_bytes: 0,
+                probed_version: None,
             };
             let result = engine.run_all(&mut ctx);
 
@@ -392,7 +399,7 @@ impl Engine {
 
     // ---- stages ----
 
-    fn stage_preflight(&self, _ctx: &mut Ctx) -> Result<StageResult> {
+    fn stage_preflight(&self, ctx: &mut Ctx) -> Result<StageResult> {
         paths::ensure_dirs()?;
 
         // Provision missing portable tools automatically (self-contained, in
@@ -437,6 +444,21 @@ impl Engine {
                 );
             }
         }
+        // A custom install root can live on a different filesystem than the
+        // build workspace — check it separately.
+        let root = ctx.settings.install_root();
+        std::fs::create_dir_all(&root).ok();
+        if let Some(free) = free_space(&root) {
+            const NEED_INSTALL: u64 = 500 * (1 << 20);
+            if free < NEED_INSTALL {
+                bail!(
+                    "not enough free disk space at the install location: {} available, \
+                     about {} needed",
+                    fmt_bytes(free),
+                    fmt_bytes(NEED_INSTALL)
+                );
+            }
+        }
         Ok(StageResult::Done("tools ready".into()))
     }
 
@@ -464,12 +486,27 @@ impl Engine {
         }
 
         let zip_path = paths::cache_dir().join(format!("Aseprite-{}-Source.zip", release.tag));
+        if release.source_zip_sha256.is_none() {
+            self.log_line("Note: this release publishes no source checksum; verifying size only.");
+        }
+        let expected = net::Expected {
+            size: Some(release.source_zip_size),
+            sha256: release.source_zip_sha256.clone(),
+        };
         let mut meter = SpeedMeter::new();
-        net::download_with_resume(&release.source_zip_url, &zip_path, &self.cancel, |d, t| {
-            if let Some((detail, progress)) = meter.tick(d, t.or(Some(release.source_zip_size))) {
-                self.update_stage_progress("source", progress, detail);
-            }
-        })?;
+        net::download_verified(
+            &release.source_zip_url,
+            &zip_path,
+            &expected,
+            &self.cancel,
+            |d, t| {
+                if let Some((detail, progress)) =
+                    meter.tick(d, t.or(Some(release.source_zip_size)))
+                {
+                    self.update_stage_progress("source", progress, detail);
+                }
+            },
+        )?;
 
         self.update_stage_progress("source", None, "extracting");
         std::fs::remove_dir_all(&base).ok();
@@ -487,14 +524,25 @@ impl Engine {
 
     fn stage_skia(&self, ctx: &mut Ctx) -> Result<StageResult> {
         let src_root = ctx.src_root.clone().ok_or_else(|| anyhow!("no source tree"))?;
-        let pinned = detect_skia_tag(&src_root);
-        if let Some(t) = &pinned {
-            self.log_line(format!("Source pins Skia {t}"));
-        } else {
-            self.log_line("No pinned Skia tag found in the source; using the latest Skia release.".to_string());
-        }
 
-        let (tag, asset_name, url) = github::skia_asset(pinned.as_deref())?;
+        // A pinned Skia is resolved exactly or not at all — a pinned
+        // dependency must never silently become a different version.
+        let asset = match detect_skia_tag(&src_root) {
+            Some(pin) => {
+                self.log_line(format!("Source pins Skia {pin}"));
+                github::skia_asset_exact(&pin)?
+            }
+            None => {
+                self.log_line(
+                    "Warning: no Skia pin found in the source tree; falling back to the \
+                     latest Skia release."
+                        .to_string(),
+                );
+                github::skia_asset_latest()?
+            }
+        };
+
+        let tag = asset.tag.clone();
         let dest = paths::cache_dir().join("skia").join(&tag);
         let marker = dest.join(".extract-ok");
         if marker.is_file() {
@@ -504,9 +552,13 @@ impl Engine {
 
         // Tag-qualified filename: a leftover zip from a different pinned tag
         // must never be mistaken for this one.
-        let zip_path = paths::cache_dir().join(format!("{tag}-{asset_name}"));
+        let zip_path = paths::cache_dir().join(format!("{tag}-{}", asset.asset_name));
+        let expected = net::Expected {
+            size: None,
+            sha256: asset.sha256.clone(),
+        };
         let mut meter = SpeedMeter::new();
-        net::download_with_resume(&url, &zip_path, &self.cancel, |d, t| {
+        net::download_verified(&asset.url, &zip_path, &expected, &self.cancel, |d, t| {
             if let Some((detail, progress)) = meter.tick(d, t) {
                 self.update_stage_progress("skia", progress, detail);
             }
@@ -557,17 +609,52 @@ impl Engine {
 
         #[cfg(target_os = "linux")]
         {
-            // The prebuilt Skia links against the default libstdc++, so the
-            // default standard library of clang/gcc matches it as-is.
             let (cc, cxx) =
                 toolchain::linux_compiler().ok_or_else(|| anyhow!("no C++ compiler found"))?;
             args.push(format!("-DCMAKE_C_COMPILER={}", cc.display()));
             args.push(format!("-DCMAKE_CXX_COMPILER={}", cxx.display()));
+            // The prebuilt Skia links against libstdc++. gcc always uses it;
+            // for clang say so explicitly instead of relying on the distro's
+            // default stdlib configuration.
+            if cxx.file_name().is_some_and(|n| n.to_string_lossy().contains("clang")) {
+                args.push("-DCMAKE_CXX_FLAGS=-stdlib=libstdc++".into());
+                args.push("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libstdc++".into());
+            }
         }
 
-        // Skip only when the previous configuration used identical inputs;
-        // changed flags (e.g. after an app update) rebuild from scratch.
-        let fingerprint = format!("{}\n{}", cmake.display(), args.join("\n"));
+        // Skip only when the previous configuration used identical semantic
+        // inputs: tool identities AND versions AND flags AND backend rules.
+        // Changing any of them (e.g. a compiler upgrade, or an app update
+        // that adds a flag) rebuilds from scratch.
+        let compiler_id = {
+            #[cfg(target_os = "linux")]
+            {
+                toolchain::linux_compiler()
+                    .map(|(_, cxx)| {
+                        format!("{} {}", cxx.display(), toolchain::tool_version(&cxx))
+                    })
+                    .unwrap_or_default()
+            }
+            #[cfg(target_os = "windows")]
+            {
+                toolchain::vcvars64()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            {
+                String::new()
+            }
+        };
+        let fingerprint = format!(
+            "rules:{BACKEND_RULES_VERSION}\ncmake:{} {}\nninja:{} {}\ncompiler:{}\n{}",
+            cmake.display(),
+            toolchain::tool_version(&cmake),
+            ninja.display(),
+            toolchain::tool_version(&ninja),
+            compiler_id,
+            args.join("\n")
+        );
         if build.join("CMakeCache.txt").is_file() {
             if std::fs::read_to_string(&marker).ok().as_deref() == Some(fingerprint.as_str()) {
                 return Ok(StageResult::Skipped("already configured".into()));
@@ -626,23 +713,42 @@ impl Engine {
         let build_bin = paths::build_dir(&release.version).join("bin");
         let root = ctx.settings.install_root();
 
+        // Heal any interrupted previous install transaction first so a crash
+        // can never cost the last working build.
+        installer::recover_install(&root);
+
         self.update_stage_progress("install", None, "copying files");
-        ctx.installed_bytes = installer::install_build(&build_bin, &root)?;
-
-        let bin = installer::aseprite_bin(&root);
-        let version = toolchain::probe_aseprite_version(&bin).unwrap_or(release.version.clone());
-
-        PersistedState::update(|st| {
-            st.installed_version = Some(version);
-            st.install_path = Some(root.display().to_string());
-        });
+        let (bytes, version) = installer::install_build(&build_bin, &root, |staged_bin| {
+            // The staged binary must actually run before we activate it.
+            toolchain::probe_aseprite_version(staged_bin).ok_or_else(|| {
+                anyhow!(
+                    "the freshly built Aseprite binary failed to run (--version) — \
+                     keeping the previous install"
+                )
+            })
+        })?;
+        ctx.installed_bytes = bytes;
+        ctx.probed_version = Some(version);
 
         Ok(StageResult::Done(fmt_bytes(ctx.installed_bytes)))
     }
 
     fn stage_register(&self, ctx: &mut Ctx) -> Result<StageResult> {
+        let release = ctx.release.as_ref().ok_or_else(|| anyhow!("no release"))?;
         let src_root = ctx.src_root.clone().ok_or_else(|| anyhow!("no source tree"))?;
-        installer::register_launcher(&ctx.settings.install_root(), &src_root)?;
+        let root = ctx.settings.install_root();
+        installer::register_launcher(&root, &src_root)?;
+
+        // Installed state commits only after the launcher exists — a failed
+        // registration leaves a retryable stage, not a half-recorded install.
+        let version = ctx
+            .probed_version
+            .clone()
+            .unwrap_or_else(|| release.version.clone());
+        PersistedState::update(|st| {
+            st.installed_version = Some(version);
+            st.install_path = Some(root.display().to_string());
+        });
         Ok(StageResult::Done("launcher entry created".into()))
     }
 
@@ -651,22 +757,33 @@ impl Engine {
             return Ok(StageResult::Skipped("disabled in settings".into()));
         }
         let mut cleaned = 0u64;
+        let mut partial = false;
         for dir in [paths::work_dir(), paths::cache_dir()] {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
             for entry in entries.flatten() {
                 let p = entry.path();
-                cleaned += archive::dir_size(&p);
+                let size = archive::dir_size(&p);
                 if p.is_dir() {
                     std::fs::remove_dir_all(&p).ok();
                 } else {
                     std::fs::remove_file(&p).ok();
                 }
+                // Only count bytes that are confirmed gone.
+                if p.exists() {
+                    partial = true;
+                } else {
+                    cleaned += size;
+                }
             }
         }
         ctx.cleaned_bytes = cleaned;
-        Ok(StageResult::Done(format!("{} freed", fmt_bytes(cleaned))))
+        Ok(StageResult::Done(if partial {
+            format!("{} freed (some files were in use)", fmt_bytes(cleaned))
+        } else {
+            format!("{} freed", fmt_bytes(cleaned))
+        }))
     }
 
     // ---- process running ----
@@ -778,9 +895,20 @@ fn resolve_src_root(base: &Path) -> Result<PathBuf> {
     ))
 }
 
-/// Look for a pinned Skia release tag (e.g. "m124-08a5439a6b") in the source
-/// tree's documentation.
+/// The pinned Skia release tag for this source tree.
+///
+/// `laf/misc/skia-tag.txt` is upstream's authoritative pin; the documentation
+/// scanner remains only as a compatibility fallback for older source layouts.
 fn detect_skia_tag(src_root: &Path) -> Option<String> {
+    let pin_file = src_root.join("laf").join("misc").join("skia-tag.txt");
+    if let Ok(text) = std::fs::read_to_string(&pin_file) {
+        let tag = text.trim();
+        // Validate the shape (m###-hex) before trusting it.
+        if scan_skia_tag(tag).as_deref() == Some(tag) {
+            return Some(tag.to_string());
+        }
+    }
+
     let candidates = [
         src_root.join("INSTALL.md"),
         src_root.join("laf").join("misc").join("skia-url.sh"),
@@ -868,20 +996,6 @@ fn kill_process_tree(pid: u32) {
     }
 }
 
-#[cfg(unix)]
 fn free_space(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0 {
-        Some(s.f_bavail as u64 * s.f_frsize as u64)
-    } else {
-        None
-    }
-}
-
-#[cfg(not(unix))]
-fn free_space(_path: &Path) -> Option<u64> {
-    None
+    fs4::available_space(path).ok()
 }

@@ -4,3 +4,4 @@ src-tauri/target
 src-tauri/updater.key
 src-tauri/gen
 .claude
+Aseprite_Compiler_Backend_Research_*.md

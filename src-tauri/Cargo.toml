@@ -29,6 +29,8 @@ ureq = { version = "3", features = ["rustls"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
+sha2 = "0.10"
+fs4 = { version = "0.13", features = ["sync"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

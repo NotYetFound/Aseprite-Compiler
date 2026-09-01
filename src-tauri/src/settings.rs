@@ -66,7 +66,11 @@ impl Settings {
 
     pub fn save(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(paths::config_dir())?;
-        std::fs::write(paths::settings_file(), serde_json::to_string_pretty(self)?)?;
+        // Atomic replace so a crash mid-write can't corrupt the file.
+        let path = paths::settings_file();
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     }
 
