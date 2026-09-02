@@ -61,6 +61,8 @@ body {
 
 button {
   font: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
   color: var(--text);
   background: var(--surface-2);
   border: none;
