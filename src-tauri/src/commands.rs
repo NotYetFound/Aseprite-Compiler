@@ -154,6 +154,51 @@ pub async fn uninstall_aseprite(app: AppHandle, engine: State<'_, Arc<Engine>>) 
     .map_err(err_str)?
 }
 
+/// "Clean up & close": remove everything the app has downloaded or generated
+/// (portable tools, caches, work trees, logs, compiler cache), optionally
+/// uninstall Aseprite too, then exit without re-creating anything — the
+/// folders come back the next time the app runs.
+#[tauri::command]
+pub async fn cleanup_app(
+    app: AppHandle,
+    engine: State<'_, Arc<Engine>>,
+    uninstall_aseprite: bool,
+) -> CmdResult<()> {
+    if engine.running() {
+        return Err("a build is running — cancel it first".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
+        if uninstall_aseprite {
+            let root = PersistedState::load()
+                .install_path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| Settings::load().install_root());
+            installer::uninstall(&root).map_err(err_str)?;
+            PersistedState::update(|st| {
+                st.installed_version = None;
+                st.install_path = None;
+            });
+        }
+        // The installed Aseprite (data/install) survives unless it was
+        // uninstalled above; everything else goes.
+        for dir in [
+            crate::paths::tools_dir(),
+            crate::paths::work_dir(),
+            crate::paths::cache_dir(),
+            crate::paths::logs_dir(),
+            crate::paths::ccache_dir(),
+        ] {
+            std::fs::remove_dir_all(dir).ok();
+        }
+        std::fs::remove_dir(crate::paths::data_dir()).ok(); // only if now empty
+        Ok(())
+    })
+    .await
+    .map_err(err_str)??;
+    app.exit(0);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn open_path(app: AppHandle, path: String) -> CmdResult<()> {
     if path.starts_with("http://") || path.starts_with("https://") {

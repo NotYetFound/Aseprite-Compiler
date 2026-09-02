@@ -492,7 +492,72 @@ pub fn provision(cancel: &AtomicBool, mut log: impl FnMut(String)) -> Result<()>
         log("Portable CMake installed.".into());
     }
 
+    // Idempotent: also trims installs provisioned before pruning existed.
+    prune_portable_cmake(&mut log);
+
     Ok(())
+}
+
+/// Trim the portable CMake to what the pipeline actually uses. The official
+/// distribution ships documentation, man pages, cmake-gui, ctest and cpack —
+/// roughly two thirds of its size — none of which this app ever runs.
+fn prune_portable_cmake(log: &mut impl FnMut(String)) {
+    let root = paths::tools_dir().join("cmake");
+    if !root.is_dir() {
+        return;
+    }
+
+    let mut victims = vec![root.join("doc"), root.join("man")];
+
+    // bin: keep cmake itself, plus cmcldeps and any DLLs on Windows (the
+    // Ninja generator needs cmcldeps for MSVC resource dependency scanning).
+    if let Ok(entries) = std::fs::read_dir(root.join("bin")) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            let keep = name == exe("cmake").to_lowercase()
+                || name == "cmcldeps.exe"
+                || name.ends_with(".dll");
+            if !keep {
+                victims.push(e.path());
+            }
+        }
+    }
+
+    // share: keep only the cmake-X.Y payload (Modules/Templates), minus its
+    // bundled Help and editor integrations.
+    if let Ok(entries) = std::fs::read_dir(root.join("share")) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("cmake-") {
+                victims.push(e.path().join("Help"));
+                victims.push(e.path().join("editors"));
+            } else {
+                victims.push(e.path());
+            }
+        }
+    }
+
+    let mut removed = 0u64;
+    for p in victims {
+        if !p.exists() {
+            continue;
+        }
+        let size = crate::archive::dir_size(&p);
+        let ok = if p.is_dir() {
+            std::fs::remove_dir_all(&p).is_ok()
+        } else {
+            std::fs::remove_file(&p).is_ok()
+        };
+        if ok {
+            removed += size;
+        }
+    }
+    if removed > 0 {
+        log(format!(
+            "Trimmed portable CMake by {}.",
+            crate::pipeline::fmt_bytes(removed)
+        ));
+    }
 }
 
 /// Best-effort read of the installed Aseprite's own version.

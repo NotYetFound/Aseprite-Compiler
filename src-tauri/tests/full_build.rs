@@ -72,6 +72,32 @@ fn skia_tag_scan() {
     assert_eq!(aseprite_compiler_lib::pipeline::scan_skia_tag("no tags here m12"), None);
 }
 
+/// Force-provision the portable tools (hiding any system copies via PATH)
+/// and verify they run after the CMake distribution is pruned.
+#[test]
+#[ignore]
+fn provision_portable() {
+    std::env::set_var("PATH", "");
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    aseprite_compiler_lib::toolchain::provision(&cancel, |m| eprintln!("[provision] {m}"))
+        .expect("provision");
+
+    let cmake = aseprite_compiler_lib::toolchain::require_cmake().unwrap();
+    let ninja = aseprite_compiler_lib::toolchain::require_ninja().unwrap();
+    assert!(!aseprite_compiler_lib::toolchain::tool_version(&cmake).is_empty());
+    assert!(!aseprite_compiler_lib::toolchain::tool_version(&ninja).is_empty());
+    // The pruned distribution must still have its Modules payload.
+    let share = cmake.parent().unwrap().parent().unwrap().join("share");
+    let modules = std::fs::read_dir(&share)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with("cmake-"))
+        .map(|e| e.path().join("Modules"))
+        .expect("cmake-X.Y under share");
+    assert!(modules.is_dir(), "Modules must survive pruning");
+    eprintln!("portable cmake: {}", cmake.display());
+}
+
 #[test]
 #[ignore]
 fn full_build() {

@@ -19,6 +19,8 @@ export const api = {
   getPipelineState: () => invoke<PipelineState>("get_pipeline_state"),
   launchAseprite: () => invoke<void>("launch_aseprite"),
   uninstallAseprite: () => invoke<void>("uninstall_aseprite"),
+  cleanupApp: (uninstallAseprite: boolean) =>
+    invoke<void>("cleanup_app", { uninstallAseprite }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   exportDiagnostics: () => invoke<string>("export_diagnostics"),

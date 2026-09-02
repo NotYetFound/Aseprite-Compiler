@@ -49,6 +49,21 @@
       uninstallError = String(e);
     }
   }
+
+  let cleanupOpen = $state(false);
+  let cleanupBusy = $state(false);
+  let cleanupError = $state<string | null>(null);
+
+  async function cleanup(uninstallAseprite: boolean) {
+    cleanupBusy = true;
+    cleanupError = null;
+    try {
+      await api.cleanupApp(uninstallAseprite); // the app closes on success
+    } catch (e) {
+      cleanupBusy = false;
+      cleanupError = String(e);
+    }
+  }
 </script>
 
 <section class="card settings">
@@ -206,12 +221,47 @@
     {#if uninstallError}
       <div class="mono err">{uninstallError}</div>
     {/if}
+
+    <div class="row">
+      <div class="text">
+        <div class="label">Clean up &amp; close</div>
+        <div class="dim small">
+          Remove the portable tools, caches, and logs this app downloaded, then
+          close it. Everything comes back automatically the next time you build.
+        </div>
+      </div>
+      <button onclick={() => (cleanupOpen = true)}>Clean up…</button>
+    </div>
+    {#if cleanupError}
+      <div class="mono err">{cleanupError}</div>
+    {/if}
   </div>
 
   {#if saveError}
     <div class="mono err">Could not save settings: {saveError}</div>
   {/if}
 </section>
+
+{#if cleanupOpen}
+  <div class="scrim" role="presentation" onclick={() => !cleanupBusy && (cleanupOpen = false)}>
+    <div class="dialog" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+      <div class="dialog-title">Clean up &amp; close</div>
+      <div class="dim dialog-body">
+        This removes the portable tools, downloads, caches, and logs, and closes
+        the app. Do you also want to uninstall Aseprite?
+      </div>
+      {#if cleanupBusy}
+        <div class="dim dialog-body">Cleaning up…</div>
+      {:else}
+        <div class="dialog-actions">
+          <button class="primary" onclick={() => cleanup(false)}>Keep Aseprite</button>
+          <button class="danger" onclick={() => cleanup(true)}>Uninstall Aseprite too</button>
+          <button onclick={() => (cleanupOpen = false)}>Cancel</button>
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
 
 <style>
   .settings {
@@ -274,5 +324,44 @@
     color: var(--err);
     padding: 4px 0 10px;
     user-select: text;
+  }
+
+  .scrim {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+
+  .dialog {
+    background: var(--surface);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius);
+    padding: 20px;
+    width: min(420px, calc(100vw - 48px));
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .dialog-title {
+    font-weight: 600;
+    font-size: 15px;
+  }
+
+  .dialog-body {
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .dialog-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    margin-top: 4px;
   }
 </style>

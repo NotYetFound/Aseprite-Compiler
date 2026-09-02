@@ -146,6 +146,7 @@ pub fn run() {
             commands::get_log_tail,
             commands::launch_aseprite,
             commands::uninstall_aseprite,
+            commands::cleanup_app,
             commands::open_path,
             commands::reveal_path,
             commands::export_diagnostics,
