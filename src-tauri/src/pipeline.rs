@@ -173,6 +173,8 @@ struct Ctx {
     cleaned_bytes: u64,
     /// Version reported by the staged binary during install validation.
     probed_version: Option<String>,
+    /// Background Skia download started while the source tree extracts.
+    skia_prefetch: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct Engine {
@@ -182,7 +184,7 @@ pub struct Engine {
     /// Full log of the current run, persisted under the app's logs dir so a
     /// failure can be diagnosed after the fact (see export_diagnostics).
     log_file: Mutex<Option<std::fs::File>>,
-    cancel: AtomicBool,
+    cancel: Arc<AtomicBool>,
     running: AtomicBool,
     child_pid: Mutex<Option<u32>>,
     /// Last time a progress-only state update was pushed to the UI. Compile
@@ -208,7 +210,7 @@ impl Engine {
             }),
             log: Mutex::new(VecDeque::new()),
             log_file: Mutex::new(None),
-            cancel: AtomicBool::new(false),
+            cancel: Arc::new(AtomicBool::new(false)),
             running: AtomicBool::new(false),
             child_pid: Mutex::new(None),
             progress_emitted: Mutex::new(Instant::now()),
@@ -383,6 +385,7 @@ impl Engine {
                 installed_bytes: 0,
                 cleaned_bytes: 0,
                 probed_version: None,
+                skia_prefetch: None,
             };
             let result = engine.run_all(&mut ctx);
 
@@ -562,10 +565,12 @@ impl Engine {
 
     fn stage_source(&self, ctx: &mut Ctx) -> Result<StageResult> {
         let release = ctx.release.as_ref().ok_or_else(|| anyhow!("no release resolved"))?;
-        let base = paths::src_dir(&release.version);
-        let marker = base.join(".extract-ok");
-        if marker.is_file() {
-            ctx.src_root = Some(resolve_src_root(&base)?);
+        let src = paths::src_dir();
+        let marker = paths::src_version_marker();
+        if std::fs::read_to_string(&marker).ok().as_deref() == Some(release.tag.as_str())
+            && src.join("CMakeLists.txt").is_file()
+        {
+            ctx.src_root = Some(src);
             return Ok(StageResult::Skipped("already downloaded".into()));
         }
 
@@ -592,22 +597,75 @@ impl Engine {
             },
         )?;
 
+        // The Skia pin is readable straight out of the zip — start the Skia
+        // download now so it overlaps with the extraction below.
+        ctx.skia_prefetch = self.spawn_skia_prefetch(&zip_path);
+
         self.update_stage_progress("source", None, "extracting");
-        std::fs::remove_dir_all(&base).ok();
-        archive::extract_zip(&zip_path, &base, &self.cancel, |done, total| {
+        let tmp = paths::work_dir().join(".src-extract");
+        std::fs::remove_dir_all(&tmp).ok();
+        archive::extract_zip(&zip_path, &tmp, &self.cancel, |done, total| {
             self.update_stage_progress(
                 "source",
                 Some(done as f64 / total.max(1) as f64),
                 format!("extracting {done}/{total} files"),
             );
         })?;
-        std::fs::write(&marker, b"ok")?;
-        ctx.src_root = Some(resolve_src_root(&base)?);
+        let new_root = resolve_src_root(&tmp)?;
+
+        // Sync into the stable tree instead of replacing it: unchanged files
+        // keep their timestamps, so a kept build directory stays incremental
+        // and ninja recompiles only what actually changed between versions.
+        std::fs::remove_file(&marker).ok();
+        if src.is_dir() {
+            self.update_stage_progress("source", None, "syncing changed files");
+            let (changed, removed) = sync_tree(&new_root, &src)?;
+            self.log_line(format!(
+                "Source updated: {changed} files changed, {removed} removed."
+            ));
+            std::fs::remove_dir_all(&tmp).ok();
+        } else {
+            std::fs::rename(&new_root, &src).context("moving source tree into place")?;
+            std::fs::remove_dir_all(&tmp).ok();
+        }
+        std::fs::write(&marker, &release.tag)?;
+        ctx.src_root = Some(src);
         Ok(StageResult::Done(release.tag.clone()))
+    }
+
+    /// Read the Skia pin from the source zip and download the matching Skia
+    /// package in the background (best effort — the Skia stage re-checks
+    /// everything and simply finds the file already on disk and verified).
+    fn spawn_skia_prefetch(&self, zip_path: &Path) -> Option<std::thread::JoinHandle<()>> {
+        let pin = read_pin_from_zip(zip_path)?;
+        if paths::cache_dir().join("skia").join(&pin).join(".extract-ok").is_file() {
+            return None; // already extracted — nothing to download
+        }
+        let cancel = Arc::clone(&self.cancel);
+        Some(std::thread::spawn(move || {
+            let Ok(asset) = github::skia_asset_exact(&pin) else {
+                return;
+            };
+            let dest = paths::cache_dir().join(format!("{}-{}", asset.tag, asset.asset_name));
+            let expected = net::Expected {
+                size: None,
+                sha256: asset.sha256.clone(),
+            };
+            let _ = net::download_verified(&asset.url, &dest, &expected, &cancel, |_, _| {});
+        }))
     }
 
     fn stage_skia(&self, ctx: &mut Ctx) -> Result<StageResult> {
         let src_root = ctx.src_root.clone().ok_or_else(|| anyhow!("no source tree"))?;
+
+        // Wait for the background download started during extraction; the
+        // verified zip is then found on disk below (any prefetch failure is
+        // simply retried here on the normal path).
+        if let Some(prefetch) = ctx.skia_prefetch.take() {
+            self.update_stage_progress("skia", None, "finishing background download");
+            let _ = prefetch.join();
+            self.check_cancel()?;
+        }
 
         // A cached extraction of the pinned tag needs no network at all —
         // the pin names the exact version, so there is nothing to resolve.
@@ -674,10 +732,9 @@ impl Engine {
     }
 
     fn stage_configure(&self, ctx: &mut Ctx) -> Result<StageResult> {
-        let release = ctx.release.as_ref().ok_or_else(|| anyhow!("no release"))?;
         let src_root = ctx.src_root.clone().ok_or_else(|| anyhow!("no source tree"))?;
         let skia = ctx.skia_dir.clone().ok_or_else(|| anyhow!("no skia"))?;
-        let build = paths::build_dir(&release.version);
+        let build = paths::build_dir();
         let marker = build.join(".configure-ok");
 
         let cmake = toolchain::require_cmake()?;
@@ -807,8 +864,7 @@ impl Engine {
     }
 
     fn stage_compile(&self, ctx: &mut Ctx) -> Result<StageResult> {
-        let release = ctx.release.as_ref().ok_or_else(|| anyhow!("no release"))?;
-        let build = paths::build_dir(&release.version);
+        let build = paths::build_dir();
         let ninja = toolchain::require_ninja()?;
 
         let mut args: Vec<String> = vec!["-C".into(), build.display().to_string()];
@@ -845,8 +901,7 @@ impl Engine {
     }
 
     fn stage_install(&self, ctx: &mut Ctx) -> Result<StageResult> {
-        let release = ctx.release.as_ref().ok_or_else(|| anyhow!("no release"))?;
-        let build_bin = paths::build_dir(&release.version).join("bin");
+        let build_bin = paths::build_dir().join("bin");
         let root = ctx.settings.install_root();
 
         // Heal any interrupted previous install transaction first so a crash
@@ -892,34 +947,65 @@ impl Engine {
         if !ctx.settings.cleanup_after_build {
             return Ok(StageResult::Skipped("disabled in settings".into()));
         }
+        let keep = ctx.settings.keep_build_files;
+        let keep_skia_tag = ctx
+            .skia_dir
+            .as_ref()
+            .and_then(|d| d.file_name())
+            .map(|n| n.to_os_string());
+
         let mut cleaned = 0u64;
         let mut partial = false;
-        for dir in [paths::work_dir(), paths::cache_dir()] {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
+        let mut remove = |p: &Path| {
+            let size = archive::dir_size(p);
+            if p.is_dir() {
+                std::fs::remove_dir_all(p).ok();
+            } else {
+                std::fs::remove_file(p).ok();
+            }
+            // Only count bytes that are confirmed gone.
+            if p.exists() {
+                partial = true;
+            } else {
+                cleaned += size;
+            }
+        };
+
+        if let Ok(entries) = std::fs::read_dir(paths::work_dir()) {
             for entry in entries.flatten() {
-                let p = entry.path();
-                let size = archive::dir_size(&p);
-                if p.is_dir() {
-                    std::fs::remove_dir_all(&p).ok();
-                } else {
-                    std::fs::remove_file(&p).ok();
+                let name = entry.file_name();
+                if keep && (name == "src" || name == "build" || name == "src.version") {
+                    continue;
                 }
-                // Only count bytes that are confirmed gone.
-                if p.exists() {
-                    partial = true;
-                } else {
-                    cleaned += size;
-                }
+                remove(&entry.path());
             }
         }
+        if let Ok(entries) = std::fs::read_dir(paths::cache_dir()) {
+            for entry in entries.flatten() {
+                // The extracted Skia is part of the kept build inputs (the
+                // build directory links against it); prune other tags only.
+                if keep && entry.file_name() == "skia" {
+                    if let Ok(tags) = std::fs::read_dir(entry.path()) {
+                        for tag in tags.flatten() {
+                            if Some(tag.file_name()) != keep_skia_tag {
+                                remove(&tag.path());
+                            }
+                        }
+                    }
+                    continue;
+                }
+                remove(&entry.path());
+            }
+        }
+
         ctx.cleaned_bytes = cleaned;
-        Ok(StageResult::Done(if partial {
-            format!("{} freed (some files were in use)", fmt_bytes(cleaned))
-        } else {
-            format!("{} freed", fmt_bytes(cleaned))
-        }))
+        let mut detail = format!("{} freed", fmt_bytes(cleaned));
+        if keep {
+            detail.push_str(" (build files kept for fast updates)");
+        } else if partial {
+            detail.push_str(" (some files were in use)");
+        }
+        Ok(StageResult::Done(detail))
     }
 
     // ---- process running ----
@@ -1049,6 +1135,107 @@ fn resolve_src_root(base: &Path) -> Result<PathBuf> {
         "could not find CMakeLists.txt under {}",
         base.display()
     ))
+}
+
+/// Mirror `from` into `to`, touching only what differs: new/changed files
+/// are copied (fresh mtimes → they rebuild), identical files are left alone
+/// (old mtimes → ninja considers them up to date), files that no longer
+/// exist upstream are deleted. Returns (changed, removed) counts.
+fn sync_tree(from: &Path, to: &Path) -> Result<(u64, u64)> {
+    let mut changed = 0u64;
+    let mut removed = 0u64;
+    sync_copy(from, to, &mut changed)?;
+    sync_remove_orphans(from, to, &mut removed)?;
+    Ok((changed, removed))
+}
+
+fn sync_copy(from: &Path, to: &Path, changed: &mut u64) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            sync_copy(&entry.path(), &dest, changed)?;
+        } else {
+            let src = entry.path();
+            if !same_file_content(&src, &dest) {
+                if dest.is_dir() {
+                    std::fs::remove_dir_all(&dest).ok();
+                }
+                std::fs::copy(&src, &dest)
+                    .with_context(|| format!("copying {}", src.display()))?;
+                *changed += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sync_remove_orphans(from: &Path, to: &Path, removed: &mut u64) -> Result<()> {
+    for entry in std::fs::read_dir(to)? {
+        let entry = entry?;
+        let src = from.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            if src.is_dir() {
+                sync_remove_orphans(&src, &entry.path(), removed)?;
+            } else {
+                std::fs::remove_dir_all(entry.path()).ok();
+                *removed += 1;
+            }
+        } else if !src.is_file() {
+            std::fs::remove_file(entry.path()).ok();
+            *removed += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Byte-for-byte comparison, cheapest checks first.
+fn same_file_content(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (a.metadata(), b.metadata()) else {
+        return false;
+    };
+    if !mb.is_file() || ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(fa), Ok(fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let mut ra = BufReader::with_capacity(65536, fa);
+    let mut rb = BufReader::with_capacity(65536, fb);
+    let mut ba = [0u8; 8192];
+    let mut bb = [0u8; 8192];
+    loop {
+        use std::io::Read;
+        let (Ok(na), Ok(nb)) = (ra.read(&mut ba), rb.read(&mut bb)) else {
+            return false;
+        };
+        if na != nb || ba[..na] != bb[..nb] {
+            return false;
+        }
+        if na == 0 {
+            return true;
+        }
+    }
+}
+
+/// Pull `laf/misc/skia-tag.txt` straight out of the source zip, before any
+/// extraction, so the Skia download can start early.
+fn read_pin_from_zip(zip_path: &Path) -> Option<String> {
+    let file = std::fs::File::open(zip_path).ok()?;
+    let mut zip = zip::ZipArchive::new(BufReader::new(file)).ok()?;
+    let name = zip
+        .file_names()
+        .find(|n| n.ends_with("laf/misc/skia-tag.txt"))
+        .map(str::to_string)?;
+    let mut entry = zip.by_name(&name).ok()?;
+    let mut text = String::new();
+    {
+        use std::io::Read;
+        entry.read_to_string(&mut text).ok()?;
+    }
+    let tag = text.trim();
+    (scan_skia_tag(tag).as_deref() == Some(tag)).then(|| tag.to_string())
 }
 
 /// The pinned Skia release tag for this source tree.
@@ -1235,4 +1422,55 @@ fn kill_process_tree(pid: u32) {
 
 fn free_space(path: &Path) -> Option<u64> {
     fs4::available_space(path).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_tree_updates_only_differences() {
+        let base = std::env::temp_dir().join(format!("ac-sync-test-{}", std::process::id()));
+        let from = base.join("from");
+        let to = base.join("to");
+        std::fs::remove_dir_all(&base).ok();
+        for (root, files) in [
+            (&from, vec![("same.txt", "hello"), ("changed.txt", "new"), ("sub/added.txt", "x")]),
+            (&to, vec![("same.txt", "hello"), ("changed.txt", "old"), ("sub/orphan.txt", "y")]),
+        ] {
+            for (rel, content) in files {
+                let p = root.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, content).unwrap();
+            }
+        }
+        let old_mtime = std::fs::metadata(to.join("same.txt")).unwrap().modified().unwrap();
+
+        let (changed, removed) = sync_tree(&from, &to).unwrap();
+        assert_eq!((changed, removed), (2, 1)); // changed.txt + added.txt; orphan.txt
+        assert_eq!(std::fs::read_to_string(to.join("changed.txt")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(to.join("sub/added.txt")).unwrap(), "x");
+        assert!(!to.join("sub/orphan.txt").exists());
+        // The untouched file must keep its timestamp — that is what keeps
+        // ninja from rebuilding it.
+        assert_eq!(
+            std::fs::metadata(to.join("same.txt")).unwrap().modified().unwrap(),
+            old_mtime
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn pin_reads_from_zip() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("ac-pin-test-{}.zip", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zw = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("Aseprite-v1/laf/misc/skia-tag.txt", opts).unwrap();
+        zw.write_all(b"m124-08a5439a6b\n").unwrap();
+        zw.finish().unwrap();
+        assert_eq!(read_pin_from_zip(&path).as_deref(), Some("m124-08a5439a6b"));
+        std::fs::remove_file(&path).ok();
+    }
 }

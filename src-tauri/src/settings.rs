@@ -39,6 +39,10 @@ pub struct Settings {
     /// Keep a compiler cache (ccache) between builds so updates recompile
     /// only what changed. The cache lives in the app's data folder.
     pub use_ccache: bool,
+    /// Keep the source and build trees (and the extracted Skia) between
+    /// builds so an update only recompiles what changed. Costs ~2 GB in the
+    /// app's data folder; downloaded archives are still cleaned up.
+    pub keep_build_files: bool,
 }
 
 impl Default for Settings {
@@ -56,6 +60,7 @@ impl Default for Settings {
             check_on_launch: true,
             process_watch: false,
             use_ccache: false,
+            keep_build_files: true,
         }
     }
 }

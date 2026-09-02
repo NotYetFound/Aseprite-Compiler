@@ -13,6 +13,7 @@ export interface Settings {
   checkOnLaunch: boolean;
   processWatch: boolean;
   useCcache: boolean;
+  keepBuildFiles: boolean;
 }
 
 export interface ToolStatus {

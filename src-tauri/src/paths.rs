@@ -32,12 +32,20 @@ pub fn work_dir() -> PathBuf {
     data_dir().join("work")
 }
 
-pub fn src_dir(version: &str) -> PathBuf {
-    work_dir().join(format!("src-{version}"))
+/// Stable source-tree path. Deliberately not version-keyed: when build files
+/// are kept, a version update syncs changed files into the same tree so an
+/// existing build directory stays incremental (compiler paths never change).
+pub fn src_dir() -> PathBuf {
+    work_dir().join("src")
 }
 
-pub fn build_dir(version: &str) -> PathBuf {
-    work_dir().join(format!("build-{version}"))
+pub fn build_dir() -> PathBuf {
+    work_dir().join("build")
+}
+
+/// Records which release tag the source tree currently holds.
+pub fn src_version_marker() -> PathBuf {
+    work_dir().join("src.version")
 }
 
 /// Downloaded archives (source zips, Skia packages).

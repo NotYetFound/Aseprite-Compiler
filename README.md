@@ -26,7 +26,7 @@ The app manages its own portable CMake and Ninja — nothing is installed system
 
 - One-click install, update, and rebuild of the latest Aseprite (stable or beta channel)
 - Adds Aseprite to the app launcher / Start Menu
-- Cleans up source and build files after installing (on by default, ~500 MB+ freed)
+- Fast updates: build files are kept between builds (on by default) so an update only recompiles what changed; downloaded archives are cleaned up automatically
 - Per-stage progress, resumable downloads, retry from the failed stage
 - Atomic installs — a failed update keeps your previous build working
 - Update notifications when a new Aseprite is out — when you launch Aseprite (via a launcher shim), optionally when a running Aseprite is detected, or on a schedule; building is always your click

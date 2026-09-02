@@ -45,12 +45,31 @@ pub fn set_settings(
     // at (shim vs. binary) — keep it in sync.
     std::thread::spawn(installer::repair_launcher_entry);
 
-    // Turning the compiler cache off reclaims its disk space right away.
+    // Turning a keep-data-on-disk option off reclaims its space right away.
     if !settings.use_ccache {
         let dir = crate::paths::ccache_dir();
         if dir.is_dir() {
             std::thread::spawn(move || {
                 let _ = std::fs::remove_dir_all(dir);
+            });
+        }
+    }
+    if !settings.keep_build_files && !engine.running() {
+        let kept = [
+            crate::paths::src_dir(),
+            crate::paths::build_dir(),
+            crate::paths::src_version_marker(),
+            crate::paths::cache_dir().join("skia"),
+        ];
+        if kept.iter().any(|p| p.exists()) {
+            std::thread::spawn(move || {
+                for p in kept {
+                    if p.is_dir() {
+                        let _ = std::fs::remove_dir_all(&p);
+                    } else {
+                        let _ = std::fs::remove_file(&p);
+                    }
+                }
             });
         }
     }

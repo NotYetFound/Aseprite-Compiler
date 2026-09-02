@@ -106,6 +106,18 @@
 
     <label class="row">
       <div class="text">
+        <div class="label">Keep build files</div>
+        <div class="dim small">
+          Keep the source and build files between builds so updates only
+          recompile what changed (~2 GB in the app's data folder). Downloaded
+          archives are still cleaned up.
+        </div>
+      </div>
+      <input type="checkbox" bind:checked={s.keepBuildFiles} onchange={save} />
+    </label>
+
+    <label class="row">
+      <div class="text">
         <div class="label">Compiler cache</div>
         <div class="dim small">
           Keep a ccache between builds so updates recompile only what changed
