@@ -13,7 +13,9 @@
   let settings = $state<Settings | null>(null);
   let logLines = $state<string[]>([]);
 
-  const MAX_LOG = 2000;
+  // The console shows a short tail; complete logs are kept on disk. A small
+  // cap keeps DOM updates cheap when ninja emits hundreds of lines a second.
+  const MAX_LOG = 500;
 
   onMount(() => {
     const unlisteners: Array<Promise<() => void>> = [
@@ -33,7 +35,7 @@
         // (a line emitted in that window is already part of the tail).
         const pending = logLines;
         const tail = await api.getLogTail();
-        logLines = tail.concat(pending.filter((l) => !tail.includes(l)));
+        logLines = tail.concat(pending.filter((l) => !tail.includes(l))).slice(-MAX_LOG);
         status = await api.getStatus(false);
       } catch {
         return; // backend unavailable

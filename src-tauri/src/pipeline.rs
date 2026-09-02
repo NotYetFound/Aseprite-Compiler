@@ -185,6 +185,10 @@ pub struct Engine {
     cancel: AtomicBool,
     running: AtomicBool,
     child_pid: Mutex<Option<u32>>,
+    /// Last time a progress-only state update was pushed to the UI. Compile
+    /// and extraction can produce hundreds of updates per second; anything
+    /// beyond ~20/s is invisible and just burns cycles on clone + IPC.
+    progress_emitted: Mutex<Instant>,
     /// Windows: job object the running build's process tree is assigned to,
     /// so cancellation reliably kills every descendant compiler process.
     #[cfg(windows)]
@@ -207,6 +211,7 @@ impl Engine {
             cancel: AtomicBool::new(false),
             running: AtomicBool::new(false),
             child_pid: Mutex::new(None),
+            progress_emitted: Mutex::new(Instant::now()),
             #[cfg(windows)]
             job: Mutex::new(None),
         })
@@ -313,6 +318,15 @@ impl Engine {
                 s.progress = progress;
                 s.detail = detail.into();
             }
+        }
+        // Progress-only updates are throttled; stage transitions (set_stage)
+        // always emit, so no final state is ever lost.
+        {
+            let mut last = self.progress_emitted.lock().unwrap();
+            if last.elapsed() < Duration::from_millis(50) {
+                return;
+            }
+            *last = Instant::now();
         }
         self.emit_state();
     }
@@ -595,9 +609,20 @@ impl Engine {
     fn stage_skia(&self, ctx: &mut Ctx) -> Result<StageResult> {
         let src_root = ctx.src_root.clone().ok_or_else(|| anyhow!("no source tree"))?;
 
+        // A cached extraction of the pinned tag needs no network at all —
+        // the pin names the exact version, so there is nothing to resolve.
+        let pin = detect_skia_tag(&src_root);
+        if let Some(pin) = &pin {
+            let dest = paths::cache_dir().join("skia").join(pin);
+            if dest.join(".extract-ok").is_file() {
+                ctx.skia_dir = Some(dest);
+                return Ok(StageResult::Skipped(format!("{pin} cached")));
+            }
+        }
+
         // A pinned Skia is resolved exactly or not at all — a pinned
         // dependency must never silently become a different version.
-        let asset = match detect_skia_tag(&src_root) {
+        let asset = match pin {
             Some(pin) => {
                 self.log_line(format!("Source pins Skia {pin}"));
                 github::skia_asset_exact(&pin)?
@@ -688,7 +713,19 @@ impl Engine {
             // default stdlib configuration.
             if cxx.file_name().is_some_and(|n| n.to_string_lossy().contains("clang")) {
                 args.push("-DCMAKE_CXX_FLAGS=-stdlib=libstdc++".into());
-                args.push("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libstdc++".into());
+                let mut ldflags = String::from("-stdlib=libstdc++");
+                // A modern linker cuts the final link (a large static-lib
+                // executable) from many seconds to about one. Only with
+                // clang — old gcc releases reject these flags.
+                if let Some((bin, flag)) = [("mold", "-fuse-ld=mold"), ("ld.lld", "-fuse-ld=lld")]
+                    .into_iter()
+                    .find(|(bin, _)| toolchain::find_in_path(bin).is_some())
+                {
+                    ldflags.push(' ');
+                    ldflags.push_str(flag);
+                    self.log_line(format!("Linking with {bin}."));
+                }
+                args.push(format!("-DCMAKE_EXE_LINKER_FLAGS={ldflags}"));
             }
 
             // Optional compiler cache: an update rebuild recompiles only what
