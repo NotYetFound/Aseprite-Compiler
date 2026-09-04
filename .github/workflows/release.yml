@@ -44,6 +44,12 @@ jobs:
       - run: npm ci
 
       - name: Build AppImage
+        env:
+          # The bundler requires the key when an updater pubkey is configured.
+          # Its signature covers the pre-repack file and is replaced after the
+          # repack step below.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: npm run tauri build -- --bundles appimage
 
       # The bundler copies the build host's libwayland-* into the AppImage.
