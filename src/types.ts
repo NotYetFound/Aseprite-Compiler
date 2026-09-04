@@ -4,7 +4,6 @@ export type WatcherMode = "off" | "notify";
 export interface Settings {
   channel: Channel;
   installDir: string; // empty string = platform default
-  cleanupAfterBuild: boolean;
   trayEnabled: boolean;
   startMinimized: boolean;
   watcherMode: WatcherMode;

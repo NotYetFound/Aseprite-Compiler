@@ -24,7 +24,6 @@ pub enum WatcherMode {
 pub struct Settings {
     pub channel: Channel,
     pub install_dir: String,
-    pub cleanup_after_build: bool,
     pub tray_enabled: bool,
     pub start_minimized: bool,
     pub watcher_mode: WatcherMode,
@@ -50,8 +49,6 @@ impl Default for Settings {
         Self {
             channel: Channel::Stable,
             install_dir: String::new(),
-            // The build cleans up after itself by default.
-            cleanup_after_build: true,
             tray_enabled: false,
             start_minimized: false,
             watcher_mode: WatcherMode::Notify,

@@ -98,19 +98,12 @@
 
     <label class="row">
       <div class="text">
-        <div class="label">Clean up after build</div>
-        <div class="dim small">Delete source and build files after installing — saves several GB.</div>
-      </div>
-      <input type="checkbox" bind:checked={s.cleanupAfterBuild} onchange={save} />
-    </label>
-
-    <label class="row">
-      <div class="text">
         <div class="label">Keep build files</div>
         <div class="dim small">
           Keep the source and build files between builds so updates only
-          recompile what changed (~2 GB in the app's data folder). Downloaded
-          archives are still cleaned up.
+          recompile what changed (~2 GB in the app's data folder). Off:
+          everything is deleted after each build. Downloaded archives are
+          always cleaned up.
         </div>
       </div>
       <input type="checkbox" bind:checked={s.keepBuildFiles} onchange={save} />

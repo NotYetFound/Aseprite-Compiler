@@ -944,9 +944,8 @@ impl Engine {
     }
 
     fn stage_cleanup(&self, ctx: &mut Ctx) -> Result<StageResult> {
-        if !ctx.settings.cleanup_after_build {
-            return Ok(StageResult::Skipped("disabled in settings".into()));
-        }
+        // One knob: keep_build_files on = archives cleaned, trees kept for
+        // fast updates; off = everything cleaned.
         let keep = ctx.settings.keep_build_files;
         let keep_skia_tag = ctx
             .skia_dir
